@@ -207,7 +207,7 @@ The test cluster and development-server processes were stopped after verificatio
 - Provision your own empty PostgreSQL database and set local connection/key values before starting Flask.
 - Use environment variables for secrets; no credentials or provider keys are bundled or committed.
 - Neither framework debug mode nor raw driver-exception logging is enabled by this milestone.
-- No patient fixtures, PHI storage, session/authentication feature, SMS credentials, sender ID, deployment or production connection is configured.
+- No patient fixtures, PHI storage, SMS credentials, sender ID, deployment or production connection is configured. Staff sign-in exists as of Phase 1B-1 with synthetic seed accounts only; see the [Phase 1B-1 authentication guide](phase-1b-1-authentication.md).
 - Existing D01–D16 decisions remain open. Nothing in this milestone approves consent wording, clinical policy, live operation or privileged data access.
 
 The original architecture and roadmap remain preserved. Phase 1A establishes only the prerequisites for their later, separately authorized work.

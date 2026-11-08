@@ -4,9 +4,9 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Project status: Phase 1B — CI verification checkpoint.** The React/TypeScript shell, Flask health API, and PostgreSQL/Alembic foundation are checked automatically on pushes and pull requests to `main`. Clinical features remain unimplemented. All development and verification use synthetic data exclusively.
+**Project status: Phase 1B-1 — staff authentication and facility access foundation.** The React/TypeScript shell, Flask health API, PostgreSQL/Alembic foundation, and staff sign-in with server-side sessions, CSRF protection, rate limiting, and facility-scoped RBAC are checked automatically on pushes and pull requests to `main`. Clinical features remain unimplemented. All development and verification use synthetic data exclusively.
 
-**Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md).
+**Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md) · [Phase 1B-1 authentication guide](docs/phase-1b-1-authentication.md).
 
 **Automated checks:** [CI verification guide](docs/ci-verification.md) · [GitHub Actions runs](https://github.com/muhindovicent/TUNZA-SMS-COMPANION-PROJECT/actions/workflows/ci.yml).
 
@@ -51,6 +51,7 @@ Start with the [draft documentation index](docs/README.md).
 | --- | --- |
 | [Phase 1A setup](docs/phase-1a-foundation.md) | Local installation, environment variables, health API, migrations and tests |
 | [Phase 1B CI checkpoint](docs/ci-verification.md) | Automated frontend/backend checks, disposable PostgreSQL and run inspection |
+| [Phase 1B-1 authentication](docs/phase-1b-1-authentication.md) | Staff login, sessions, CSRF, rate limiting, RBAC and facility isolation |
 | [Requirements](docs/requirements.md) | Recorded v1.1 mapping, MVP boundaries, acceptance identifiers |
 | [Architecture](docs/architecture.md) | Components, module boundaries, deployments, design decisions |
 | [Database schema and ERD](docs/database-schema.md) | Entities, relationships, keys, constraints, data dictionary |
@@ -65,6 +66,6 @@ The earlier [technical implementation plan](TECHNICAL_IMPLEMENTATION_PLAN.md) is
 
 ## Development boundary
 
-This milestone contains application infrastructure only: no authentication, stakeholder dashboards, patient registration, SMS messaging, or clinical features. See the setup guide for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
+This milestone contains application infrastructure with staff authentication: no patient registration, stakeholder dashboards, SMS messaging, or clinical features. Sign-in accounts come only from the synthetic seed command; there is no self-registration. See the setup guide for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
 
 Postnatal workflows, minors' enrolment, live two-way SMS, and live emergency escalation require separate approval and are outside the current implementation authorization.

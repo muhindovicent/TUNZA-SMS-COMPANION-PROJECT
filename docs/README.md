@@ -16,6 +16,8 @@ For the implemented local infrastructure, see [Phase 1A setup and verification](
 
 For automated checks of that foundation, see the [Phase 1B CI verification checkpoint](ci-verification.md).
 
+For implemented staff sign-in, sessions, and facility-scoped access, see the [Phase 1B-1 authentication guide](phase-1b-1-authentication.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)
