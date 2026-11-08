@@ -1,0 +1,152 @@
+name: Foundation CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  frontend:
+    name: Frontend verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate frontend dependencies
+        run: npm audit
+
+      - name: Check TypeScript
+        run: npm run typecheck
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run frontend tests with coverage
+        run: npm run test:coverage
+
+      - name: Build production assets
+        run: npm run build
+
+  backend:
+    name: Backend and PostgreSQL verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      APP_ENV: testing
+      FLASK_SKIP_DOTENV: '1'
+      DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+      MIGRATION_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+      TEST_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+      TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: tunza_ci
+          POSTGRES_DB: tunza_ci_test
+          # Trust is confined to this disposable CI service. No real DB secret is needed.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - '127.0.0.1:5432:5432'
+        options: >-
+          --health-cmd "pg_isready -U tunza_ci -d tunza_ci_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements-dev.lock
+            backend/pyproject.toml
+
+      - name: Generate ephemeral test configuration
+        run: |
+          python - <<'PY'
+          import os
+          import secrets
+
+          key = secrets.token_urlsafe(48)
+          print(f"::add-mask::{key}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"SECRET_KEY={key}\n")
+          if not os.environ.get("TEST_DATABASE_URL"):
+              raise SystemExit("PostgreSQL integration configuration is required in CI.")
+          PY
+
+      - name: Install locked dependencies
+        run: python -m pip install -r requirements-dev.lock -e ".[dev]"
+
+      - name: Validate backend dependencies
+        run: python -m pip check
+
+      - name: Run Ruff lint
+        run: python -m ruff check .
+
+      - name: Check Ruff formatting
+        run: python -m ruff format --check .
+
+      - name: Apply and verify migrations
+        run: |
+          python -m flask --app tunza db upgrade
+          python -m flask --app tunza db current
+          python -m flask --app tunza db check
+
+      - name: Verify database connectivity and API readiness
+        run: |
+          python - <<'PY'
+          from tunza import create_app
+
+          with create_app().test_client() as client:
+              live = client.get("/api/v1/health/live")
+              ready = client.get("/api/v1/health/ready")
+              assert live.status_code == 200, "API liveness failed."
+              assert ready.status_code == 200, "PostgreSQL readiness failed."
+              assert ready.json["data"]["checks"]["database"] == "connected"
+          print("PostgreSQL connectivity and API health checks passed.")
+          PY
+
+      - name: Run all backend tests including PostgreSQL integration
+        run: python -m pytest --cov=tunza --cov-report=term-missing

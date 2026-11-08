@@ -4,9 +4,11 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Project status: Phase 1A — Application Foundation.** A React/TypeScript shell, Flask health API, and PostgreSQL/Alembic foundation are implemented for local development. Clinical features remain unimplemented. All development and verification use synthetic data exclusively.
+**Project status: Phase 1B — CI verification checkpoint.** The React/TypeScript shell, Flask health API, and PostgreSQL/Alembic foundation are checked automatically on pushes and pull requests to `main`. Clinical features remain unimplemented. All development and verification use synthetic data exclusively.
 
 **Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md).
+
+**Automated checks:** [CI verification guide](docs/ci-verification.md) · [GitHub Actions runs](https://github.com/muhindovicent/TUNZA-SMS-COMPANION-PROJECT/actions/workflows/ci.yml).
 
 ## Proposed pilot hospitals
 
@@ -48,6 +50,7 @@ Start with the [draft documentation index](docs/README.md).
 | Document | Purpose |
 | --- | --- |
 | [Phase 1A setup](docs/phase-1a-foundation.md) | Local installation, environment variables, health API, migrations and tests |
+| [Phase 1B CI checkpoint](docs/ci-verification.md) | Automated frontend/backend checks, disposable PostgreSQL and run inspection |
 | [Requirements](docs/requirements.md) | Recorded v1.1 mapping, MVP boundaries, acceptance identifiers |
 | [Architecture](docs/architecture.md) | Components, module boundaries, deployments, design decisions |
 | [Database schema and ERD](docs/database-schema.md) | Entities, relationships, keys, constraints, data dictionary |
