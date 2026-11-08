@@ -49,12 +49,24 @@ def test_postgres_migration_roundtrip_and_readiness():
             for _ in range(2):
                 result = runner.invoke(args=["db", "upgrade"])
                 assert result.exit_code == 0, result.output
-            assert inspect(db.engine).get_table_names() == ["alembic_version"]
             with db.engine.connect() as connection:
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0001_foundation"
+                assert revision == "0002_identity_and_access"
+            expected_tables = {
+                "alembic_version",
+                "audit_events",
+                "auth_sessions",
+                "facilities",
+                "facility_memberships",
+                "permissions",
+                "role_bindings",
+                "role_permissions",
+                "roles",
+                "users",
+            }
+            assert set(inspect(db.engine).get_table_names()) == expected_tables
             response = application.test_client().get("/api/v1/health/ready")
             assert response.status_code == 200
             assert response.json["data"]["checks"]["database"] == "connected"

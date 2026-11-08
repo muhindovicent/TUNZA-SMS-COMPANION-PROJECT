@@ -64,7 +64,8 @@ def test_factory_supports_isolated_instances_without_connecting(settings):
     assert first.config["SQLALCHEMY_ECHO"] is False
     with first.app_context():
         first_engine = db.engine
-        assert not db.metadata.tables
+        assert "users" in db.metadata.tables
+        assert "auth_sessions" in db.metadata.tables
     with second.app_context():
         assert db.engine is not first_engine
         db.engine.dispose()

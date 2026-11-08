@@ -54,7 +54,7 @@ python -m pytest --cov=tunza --cov-report=term-missing
 
 An additional inline smoke check calls the existing Flask liveness/readiness endpoints and requires HTTP 200 plus a connected database status. Readiness executes the actual SQLAlchemy `SELECT 1` check; it is not mocked.
 
-The full backend suite runs with `TEST_DATABASE_URL` and `TEST_MIGRATION_DATABASE_URL` set. The existing integration test therefore runs rather than taking its local no-database skip path. It verifies idempotent upgrade, Alembic head, metadata consistency, downgrade/re-upgrade, and real database readiness. Its loopback/test-name/same-database guards remain intact.
+The full backend suite runs with `TEST_DATABASE_URL` and `TEST_MIGRATION_DATABASE_URL` set. The PostgreSQL integration tests therefore run rather than taking their local no-database skip path. The migration round-trip verifies idempotent upgrade, Alembic head, metadata consistency, downgrade/re-upgrade, and real database readiness; the authentication integration suite exercises login, sessions, CSRF, rate limiting, RBAC, facility isolation, and the append-only audit trigger against the same disposable database, then drops back to base so the migration test still sees an empty database. Loopback/test-name/same-database guards remain intact.
 
 ## Disposable database and synthetic configuration
 
@@ -68,7 +68,7 @@ The full backend suite runs with `TEST_DATABASE_URL` and `TEST_MIGRATION_DATABAS
 
 ## Results and troubleshooting
 
-Open the run from the Actions page to inspect each named step. Frontend coverage and pytest results appear in the job logs. The current foundation has 14 frontend tests and 24 backend tests, including one PostgreSQL integration test; future authorized changes may increase those counts.
+Open the run from the Actions page to inspect each named step. Frontend coverage and pytest results appear in the job logs. The current foundation has 25 frontend tests and 56 backend tests, including 15 PostgreSQL integration tests; future authorized changes may increase those counts.
 
 If a check fails, fix the underlying dependency, formatting, build, configuration or test problem and push a new commit. Do not suppress failures, remove integration tests, relax database guards, or change advisory thresholds merely to make the workflow green. Hosted-run success is reported only after inspecting the actual run.
 
@@ -80,4 +80,4 @@ The workflow creates the status checks **Frontend verification** and **Backend a
 
 ## Scope
 
-No authentication, stakeholder dashboards, patient registration, SMS or clinical functionality is introduced. No deployment is configured. The existing architecture, application tests and security checks are preserved.
+No patient registration, stakeholder dashboards, SMS or clinical functionality is introduced. Staff authentication and facility-scoped access are covered by the [Phase 1B-1 guide](phase-1b-1-authentication.md). No deployment is configured. The existing architecture, application tests and security checks are preserved.

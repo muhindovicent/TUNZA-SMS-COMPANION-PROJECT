@@ -30,8 +30,8 @@ export default defineConfig(({ mode }) => {
       restoreMocks: true,
       coverage: {
         provider: 'v8',
-        include: ['src/App.tsx', 'src/api/**/*.ts'],
-        exclude: ['src/**/*.test.ts'],
+        include: ['src/App.tsx', 'src/api/**/*.ts', 'src/components/**/*.tsx'],
+        exclude: ['src/**/*.test.{ts,tsx}'],
       },
     },
   }

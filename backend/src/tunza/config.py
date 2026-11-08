@@ -45,6 +45,16 @@ def _integer(value: Any, name: str, minimum: int, maximum: int) -> int:
     return number
 
 
+def _boolean(value: Any, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false.")
+
+
 def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     # Use the explicit repository file, never a parent directory's unrelated .env.
     # Process environment values always win. Tests can supply all required values.
@@ -75,6 +85,37 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         30000,
     )
 
+    session_idle_timeout = _integer(
+        values.get("SESSION_IDLE_TIMEOUT_SECONDS", 1800),
+        "SESSION_IDLE_TIMEOUT_SECONDS",
+        60,
+        86400,
+    )
+    session_absolute_timeout = _integer(
+        values.get("SESSION_ABSOLUTE_TIMEOUT_SECONDS", 43200),
+        "SESSION_ABSOLUTE_TIMEOUT_SECONDS",
+        300,
+        604800,
+    )
+    csrf_token_max_age = _integer(
+        values.get("CSRF_TOKEN_MAX_AGE_SECONDS", 900),
+        "CSRF_TOKEN_MAX_AGE_SECONDS",
+        60,
+        3600,
+    )
+    login_rate_attempts = _integer(
+        values.get("LOGIN_RATE_LIMIT_ATTEMPTS", 5),
+        "LOGIN_RATE_LIMIT_ATTEMPTS",
+        1,
+        100,
+    )
+    login_rate_window = _integer(
+        values.get("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 300),
+        "LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+        10,
+        3600,
+    )
+
     return {
         "APP_ENV": environment,
         "TESTING": environment == "testing",
@@ -99,7 +140,16 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
             },
         },
         "MAX_CONTENT_LENGTH": 64 * 1024,
-        "SESSION_COOKIE_SECURE": True,
+        "SESSION_COOKIE_NAME": values.get("SESSION_COOKIE_NAME", "tunza_session"),
+        "CSRF_COOKIE_NAME": values.get("CSRF_COOKIE_NAME", "tunza_csrf"),
+        "SESSION_COOKIE_SECURE": _boolean(
+            values.get("SESSION_COOKIE_SECURE", True), "SESSION_COOKIE_SECURE"
+        ),
         "SESSION_COOKIE_HTTPONLY": True,
         "SESSION_COOKIE_SAMESITE": "Lax",
+        "SESSION_IDLE_TIMEOUT_SECONDS": session_idle_timeout,
+        "SESSION_ABSOLUTE_TIMEOUT_SECONDS": session_absolute_timeout,
+        "CSRF_TOKEN_MAX_AGE_SECONDS": csrf_token_max_age,
+        "LOGIN_RATE_LIMIT_ATTEMPTS": login_rate_attempts,
+        "LOGIN_RATE_LIMIT_WINDOW_SECONDS": login_rate_window,
     }

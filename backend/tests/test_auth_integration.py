@@ -1,0 +1,454 @@
+"""Opt-in end-to-end authentication, RBAC and facility-isolation tests (PostgreSQL only)."""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import DBAPIError
+
+from tunza import create_app
+from tunza.config import postgres_url
+from tunza.extensions import db
+from tunza.identity.models import (
+    AuditEvent,
+    AuthSession,
+    Facility,
+    FacilityMembership,
+    Permission,
+    Role,
+    RoleBinding,
+    User,
+)
+from tunza.identity.passwords import hash_password
+from tunza.identity.sessions import hash_session_token
+
+PASSWORD = "synthetic-test-password"
+
+
+@pytest.fixture(scope="module")
+def identity_app():
+    value = os.environ.get("TEST_DATABASE_URL")
+    if not value:
+        pytest.skip("Set TEST_DATABASE_URL to a dedicated empty local tunza_*_test database.")
+    url = postgres_url(value, "TEST_DATABASE_URL")
+    if (
+        url.host not in {"127.0.0.1", "localhost", "::1"}
+        or not url.database.startswith("tunza_")
+        or not url.database.endswith("_test")
+    ):
+        pytest.fail("Integration tests require a dedicated local tunza_*_test database.")
+
+    application = create_app(
+        {
+            "APP_ENV": "testing",
+            "SECRET_KEY": secrets.token_urlsafe(48),
+            "DATABASE_URL": value,
+            "MIGRATION_DATABASE_URL": value,
+            "SESSION_COOKIE_SECURE": False,
+        }
+    )
+    runner = application.test_cli_runner()
+    with application.app_context():
+        if inspect(db.engine).has_table("alembic_version"):
+            result = runner.invoke(args=["db", "downgrade", "base"])
+            assert result.exit_code == 0, result.output
+        result = runner.invoke(args=["db", "upgrade"])
+        assert result.exit_code == 0, result.output
+        db.session.remove()
+    yield application
+    with application.app_context():
+        db.session.remove()
+        result = runner.invoke(args=["db", "downgrade", "base"])
+        assert result.exit_code == 0, result.output
+        db.engine.dispose()
+
+
+@pytest.fixture(scope="module")
+def identity(identity_app):
+    with identity_app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        for code in ("VHT", "AUTHOR", "PA"):
+            assert code in roles, f"missing seeded role {code}"
+        assert (
+            db.session.scalar(select(Permission).where(Permission.code == "facility.read"))
+            is not None
+        )
+
+        facilities: dict[str, Facility] = {}
+        for code, name, active in (
+            ("TST-A", "Test Clinic A", True),
+            ("TST-B", "Test Clinic B", True),
+            ("TST-C", "Test Clinic C", True),
+            ("TST-D", "Inactive Clinic", False),
+        ):
+            facility = Facility(code=code, name=name, timezone="Africa/Kampala", active=active)
+            db.session.add(facility)
+            db.session.flush()
+            facilities[code] = facility
+
+        def make_user(login: str, display_name: str, status: str = "active") -> User:
+            user = User(
+                login_identifier=login,
+                display_name=display_name,
+                password_hash=hash_password(PASSWORD),
+                status=status,
+            )
+            db.session.add(user)
+            db.session.flush()
+            return user
+
+        users = {
+            "pa": make_user("tst.pa", "Test Platform Admin"),
+            "vht_a": make_user("tst.vht.a", "Test VHT A"),
+            "vht_b": make_user("tst.vht.b", "Test VHT B"),
+            "author": make_user("tst.author", "Test Author"),
+            "disabled": make_user("tst.disabled", "Test Disabled", status="disabled"),
+            "bumpable": make_user("tst.bump", "Test Bumpable"),
+            "revocable": make_user("tst.revocable", "Test Revocable"),
+        }
+
+        now = datetime.now(UTC)
+
+        def bind(user: User, role_code: str, scope_kind: str, facility: Facility | None = None):
+            binding = RoleBinding(
+                user_id=user.id,
+                role_id=roles[role_code].id,
+                facility_id=facility.id if facility is not None else None,
+                scope_kind=scope_kind,
+                starts_at=now,
+                granted_by=users["pa"].id,
+            )
+            db.session.add(binding)
+            db.session.flush()
+            return binding
+
+        def member(user: User, facility: Facility) -> FacilityMembership:
+            membership = FacilityMembership(
+                user_id=user.id,
+                facility_id=facility.id,
+                status="active",
+                starts_at=now,
+            )
+            db.session.add(membership)
+            db.session.flush()
+            return membership
+
+        bind(users["pa"], "PA", "platform")
+        bind(users["vht_a"], "VHT", "facility", facilities["TST-A"])
+        member(users["vht_a"], facilities["TST-A"])
+        bind(users["vht_b"], "VHT", "facility", facilities["TST-B"])
+        member(users["vht_b"], facilities["TST-B"])
+        bind(users["author"], "AUTHOR", "programme")
+        revocable_binding = bind(users["revocable"], "VHT", "facility", facilities["TST-A"])
+        revocable_membership = member(users["revocable"], facilities["TST-A"])
+
+        snapshot = SimpleNamespace(
+            app=identity_app,
+            facility_ids={code: facility.id for code, facility in facilities.items()},
+            user_ids={name: user.id for name, user in users.items()},
+            revocable_membership_id=revocable_membership.id,
+            revocable_binding_id=revocable_binding.id,
+            password=PASSWORD,
+        )
+        db.session.commit()
+        return snapshot
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limiter(identity_app):
+    limiter = identity_app.extensions["tunza.login_rate_limiter"]
+    limiter.clear()
+    yield
+    limiter.clear()
+
+
+@pytest.fixture
+def client(identity_app):
+    return identity_app.test_client()
+
+
+def _csrf(client) -> str:
+    response = client.get("/api/v1/auth/csrf")
+    assert response.status_code == 200
+    return response.json["data"]["csrf_token"]
+
+
+def _login(client, identifier: str, password: str = PASSWORD, *, expect: int = 200):
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"login_identifier": identifier, "password": password},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert response.status_code == expect, response.json
+    return response
+
+
+def _session_record(token: str) -> AuthSession | None:
+    return db.session.scalar(
+        select(AuthSession).where(AuthSession.token_hash == hash_session_token(token))
+    )
+
+
+def test_login_success_returns_session_cookie_and_identity(client, identity):
+    response = _login(client, "tst.vht.a")
+    assert response.json["data"] == {
+        "state": "active",
+        "user_id": str(identity.user_ids["vht_a"]),
+    }
+    set_cookie = response.headers["Set-Cookie"]
+    assert "tunza_session=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=Lax" in set_cookie
+    assert "Path=/" in set_cookie
+
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    data = me.json["data"]
+    assert data["display_name"] == "Test VHT A"
+    assert data["state"] == "active"
+    assert data["facilities"] == [
+        {
+            "id": str(identity.facility_ids["TST-A"]),
+            "code": "TST-A",
+            "name": "Test Clinic A",
+        }
+    ]
+    assert data["bindings"] == [
+        {
+            "role_code": "VHT",
+            "role_name": "VHT",
+            "scope_kind": "facility",
+            "facility_id": str(identity.facility_ids["TST-A"]),
+        }
+    ]
+    assert "facility.read" in data["permissions"]
+
+    with identity.app.app_context():
+        event = db.session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "login",
+                AuditEvent.outcome == "success",
+                AuditEvent.actor_id == identity.user_ids["vht_a"],
+            )
+        )
+        assert event is not None
+        assert event.resource_id is not None
+        assert PASSWORD not in json.dumps(event.event_metadata)
+
+
+def test_login_failures_are_generic_and_audited(client, identity):
+    unknown = _login(client, "tst.missing", "wrong-password", expect=401)
+    wrong = _login(client, "tst.vht.a", "wrong-password", expect=401)
+    disabled = _login(client, "tst.disabled", PASSWORD, expect=401)
+
+    generic = "Sign-in details could not be verified."
+    for response in (unknown, wrong, disabled):
+        assert response.json["error"]["code"] == "invalid_credentials"
+        assert response.json["error"]["message"] == generic
+    assert client.get_cookie("tunza_session") is None
+
+    with identity.app.app_context():
+        events = list(
+            db.session.scalars(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.action == "login",
+                    AuditEvent.outcome == "denied",
+                )
+                .order_by(AuditEvent.created_at.desc())
+                .limit(3)
+            ).all()
+        )
+        assert len(events) == 3
+        reasons = {event.event_metadata.get("reason") for event in events}
+        assert reasons <= {"invalid_credentials", "account_inactive"}
+        for event in events:
+            assert PASSWORD not in json.dumps(event.event_metadata)
+
+
+def test_login_rate_limiting_blocks_after_repeated_failures(client, identity_app):
+    limiter = identity_app.extensions["tunza.login_rate_limiter"]
+    for _ in range(identity_app.config["LOGIN_RATE_LIMIT_ATTEMPTS"]):
+        limiter.record_failure("login:ip:127.0.0.1")
+        limiter.record_failure("login:id:tst.vht.a")
+
+    response = _login(client, "tst.vht.a", PASSWORD, expect=429)
+    assert response.json["error"]["code"] == "rate_limited"
+    assert (
+        1
+        <= int(response.headers["Retry-After"])
+        <= identity_app.config["LOGIN_RATE_LIMIT_WINDOW_SECONDS"]
+    )
+
+
+def test_protected_endpoints_reject_anonymous_requests(client):
+    assert client.get("/api/v1/auth/me").status_code == 401
+    assert client.get("/api/v1/facilities").status_code == 401
+    assert client.post("/api/v1/auth/logout").status_code == 403
+
+
+def test_logout_revokes_the_session_and_requires_fresh_session_csrf(client, identity):
+    stale_pre_auth = _csrf(client)
+    _login(client, "tst.vht.a")
+    first_token = client.get_cookie("tunza_session").value
+
+    rejected = client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": stale_pre_auth})
+    assert rejected.status_code == 403
+    assert client.get("/api/v1/auth/me").status_code == 200
+
+    response = client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": _csrf(client)})
+    assert response.status_code == 204
+
+    with identity.app.app_context():
+        record = _session_record(first_token)
+        assert record is not None
+        assert record.state == "revoked"
+        assert record.revoked_at is not None
+
+    client.set_cookie("tunza_session", first_token, samesite="Lax")
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+    _login(client, "tst.vht.a")
+    second_token = client.get_cookie("tunza_session").value
+    assert second_token
+    assert second_token != first_token
+
+
+def test_absolute_session_expiry_rejects_requests(client, identity):
+    _login(client, "tst.vht.a")
+    token = client.get_cookie("tunza_session").value
+    with identity.app.app_context():
+        record = _session_record(token)
+        assert record is not None
+        record.expires_at = datetime.now(UTC) - timedelta(seconds=5)
+        db.session.commit()
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
+def test_idle_session_expiry_rejects_requests(client, identity_app, identity):
+    _login(client, "tst.vht.a")
+    token = client.get_cookie("tunza_session").value
+    idle = identity_app.config["SESSION_IDLE_TIMEOUT_SECONDS"]
+    with identity.app.app_context():
+        record = _session_record(token)
+        assert record is not None
+        record.last_seen_at = datetime.now(UTC) - timedelta(seconds=idle + 60)
+        db.session.commit()
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
+def test_security_version_change_revokes_existing_session(client, identity):
+    _login(client, "tst.bump")
+    with identity.app.app_context():
+        user = db.session.get(User, identity.user_ids["bumpable"])
+        assert user is not None
+        user.security_version += 1
+        db.session.commit()
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
+def test_author_role_cannot_read_facilities(client, identity):
+    _login(client, "tst.author")
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert "facility.read" not in me.json["data"]["permissions"]
+
+    response = client.get("/api/v1/facilities")
+    assert response.status_code == 403
+
+    with identity.app.app_context():
+        event = db.session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "access",
+                AuditEvent.outcome == "denied",
+                AuditEvent.actor_id == identity.user_ids["author"],
+            )
+        )
+        assert event is not None
+        assert event.permission == "facility.read"
+
+
+def test_vht_sees_only_their_own_facility(client, identity):
+    _login(client, "tst.vht.a")
+    listing = client.get("/api/v1/facilities")
+    assert listing.status_code == 200
+    assert [item["code"] for item in listing.json["data"]] == ["TST-A"]
+
+    own = client.get(f"/api/v1/facilities/{identity.facility_ids['TST-A']}")
+    assert own.status_code == 200
+    assert own.json["data"]["code"] == "TST-A"
+
+    other = client.get(f"/api/v1/facilities/{identity.facility_ids['TST-B']}")
+    assert other.status_code == 404
+    missing = client.get(f"/api/v1/facilities/{uuid4()}")
+    assert missing.status_code == 404
+
+
+def test_vht_b_sees_only_their_own_facility(client, identity):
+    _login(client, "tst.vht.b")
+    listing = client.get("/api/v1/facilities")
+    assert listing.status_code == 200
+    assert [item["code"] for item in listing.json["data"]] == ["TST-B"]
+    assert client.get(f"/api/v1/facilities/{identity.facility_ids['TST-A']}").status_code == 404
+
+
+def test_platform_admin_sees_every_active_facility(client, identity):
+    _login(client, "tst.pa")
+    listing = client.get("/api/v1/facilities")
+    assert listing.status_code == 200
+    assert [item["code"] for item in listing.json["data"]] == [
+        "TST-A",
+        "TST-B",
+        "TST-C",
+    ]
+    inactive = client.get(f"/api/v1/facilities/{identity.facility_ids['TST-D']}")
+    assert inactive.status_code == 404
+
+
+def test_revoking_membership_and_binding_removes_facility_access(client, identity):
+    _login(client, "tst.revocable")
+    listing = client.get("/api/v1/facilities")
+    assert [item["code"] for item in listing.json["data"]] == ["TST-A"]
+
+    with identity.app.app_context():
+        membership = db.session.get(FacilityMembership, identity.revocable_membership_id)
+        assert membership is not None
+        membership.status = "ended"
+        db.session.commit()
+    assert client.get("/api/v1/facilities").json["data"] == []
+    assert client.get(f"/api/v1/facilities/{identity.facility_ids['TST-A']}").status_code == 404
+
+    with identity.app.app_context():
+        binding = db.session.get(RoleBinding, identity.revocable_binding_id)
+        assert binding is not None
+        binding.ends_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.session.commit()
+    assert client.get("/api/v1/facilities").status_code == 403
+
+
+def test_audit_events_reject_updates_and_deletes(client, identity):
+    _login(client, "tst.vht.a")
+    with identity.app.app_context():
+        event = db.session.scalar(
+            select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(1)
+        )
+        assert event is not None
+        with pytest.raises(DBAPIError, match="append-only"):
+            db.session.execute(
+                text("UPDATE audit_events SET outcome = 'success' WHERE id = :event_id"),
+                {"event_id": event.id},
+            )
+        db.session.rollback()
+        with pytest.raises(DBAPIError, match="append-only"):
+            db.session.execute(
+                text("DELETE FROM audit_events WHERE id = :event_id"),
+                {"event_id": event.id},
+            )
+        db.session.rollback()
