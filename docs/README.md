@@ -12,6 +12,8 @@ The architecture direction has been requested for documentation. Detailed schema
 
 ## Reading order
 
+For the implemented local infrastructure, see [Phase 1A setup and verification](phase-1a-foundation.md). The draft architecture below describes the broader future system; Phase 1A does not implement identity, isolation or clinical workflows.
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)

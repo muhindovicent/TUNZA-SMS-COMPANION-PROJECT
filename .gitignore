@@ -1,0 +1,30 @@
+# Local secrets (examples are safe to track)
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+instance/
+
+# Frontend and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Local tools and editors
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log

@@ -4,7 +4,9 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Project status: draft technical documentation. Application development has not started.** Architecture approval does not constitute clinical approval or authorization to enrol real participants. All design examples and future development demonstrations use synthetic patient data exclusively.
+**Project status: Phase 1A — Application Foundation.** A React/TypeScript shell, Flask health API, and PostgreSQL/Alembic foundation are implemented for local development. Clinical features remain unimplemented. All development and verification use synthetic data exclusively.
+
+**Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md).
 
 ## Proposed pilot hospitals
 
@@ -45,6 +47,7 @@ Start with the [draft documentation index](docs/README.md).
 
 | Document | Purpose |
 | --- | --- |
+| [Phase 1A setup](docs/phase-1a-foundation.md) | Local installation, environment variables, health API, migrations and tests |
 | [Requirements](docs/requirements.md) | Recorded v1.1 mapping, MVP boundaries, acceptance identifiers |
 | [Architecture](docs/architecture.md) | Components, module boundaries, deployments, design decisions |
 | [Database schema and ERD](docs/database-schema.md) | Entities, relationships, keys, constraints, data dictionary |
@@ -59,6 +62,6 @@ The earlier [technical implementation plan](TECHNICAL_IMPLEMENTATION_PLAN.md) is
 
 ## Development boundary
 
-This repository currently contains documentation only. There is no application to install or deploy. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Future development and sandbox exercises must use synthetic patient data exclusively.
+This milestone contains application infrastructure only: no authentication, stakeholder dashboards, patient registration, SMS messaging, or clinical features. See the setup guide for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
 
 Postnatal workflows, minors' enrolment, live two-way SMS, and live emergency escalation require separate approval and are outside the current implementation authorization.
