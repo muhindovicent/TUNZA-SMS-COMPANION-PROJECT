@@ -18,6 +18,7 @@ from tunza.identity.models import (
     Facility,
     FacilityMembership,
     Permission,
+    Role,
     RoleBinding,
     User,
     role_permissions,
@@ -28,11 +29,29 @@ CONTEXT_G = "tunza_access_context"
 
 
 @dataclass(frozen=True)
+class BindingGrant:
+    """Permissions granted by one active role binding, validated against its role."""
+
+    binding: RoleBinding
+    permissions: frozenset[str]
+
+
+@dataclass(frozen=True)
 class AccessContext:
     user: User
     memberships: tuple[FacilityMembership, ...]
-    bindings: tuple[RoleBinding, ...]
-    permissions: frozenset[str]
+    grants: tuple[BindingGrant, ...]
+
+    @property
+    def bindings(self) -> tuple[RoleBinding, ...]:
+        return tuple(grant.binding for grant in self.grants)
+
+    @property
+    def permissions(self) -> frozenset[str]:
+        codes: set[str] = set()
+        for grant in self.grants:
+            codes.update(grant.permissions)
+        return frozenset(codes)
 
 
 def _utcnow() -> datetime:
@@ -51,30 +70,35 @@ def load_access_context(user: User) -> AccessContext:
             )
         ).all()
     )
-    bindings = tuple(
-        db.session.scalars(
-            select(RoleBinding).where(
+    binding_rows = tuple(
+        db.session.execute(
+            select(RoleBinding)
+            .join(Role, Role.id == RoleBinding.role_id)
+            .where(
                 RoleBinding.user_id == user.id,
                 RoleBinding.starts_at <= now,
                 or_(RoleBinding.ends_at.is_(None), RoleBinding.ends_at > now),
+                RoleBinding.scope_kind == Role.scope_kind,
             )
-        ).all()
+        ).scalars()
     )
-    permission_codes: set[str] = set()
-    if bindings:
-        permission_codes.update(
-            db.session.scalars(
-                select(Permission.code)
-                .join(role_permissions, Permission.id == role_permissions.c.permission_id)
-                .where(role_permissions.c.role_id.in_([binding.role_id for binding in bindings]))
-            ).all()
+    permissions_by_role: dict[UUID, set[str]] = {}
+    if binding_rows:
+        role_ids = [binding.role_id for binding in binding_rows]
+        for role_id, code in db.session.execute(
+            select(role_permissions.c.role_id, Permission.code)
+            .join(Permission, Permission.id == role_permissions.c.permission_id)
+            .where(role_permissions.c.role_id.in_(role_ids))
+        ):
+            permissions_by_role.setdefault(role_id, set()).add(code)
+    grants = tuple(
+        BindingGrant(
+            binding=binding,
+            permissions=frozenset(permissions_by_role.get(binding.role_id, ())),
         )
-    return AccessContext(
-        user=user,
-        memberships=memberships,
-        bindings=bindings,
-        permissions=frozenset(permission_codes),
+        for binding in binding_rows
     )
+    return AccessContext(user=user, memberships=memberships, grants=grants)
 
 
 def get_access_context() -> AccessContext | None:
@@ -91,25 +115,27 @@ def active_membership_facilities(context: AccessContext) -> set[UUID]:
 
 
 def facility_scope_allows(context: AccessContext, facility_id: UUID, permission: str) -> bool:
-    if permission not in context.permissions:
-        return False
-    if facility_id in active_membership_facilities(context):
-        for binding in context.bindings:
-            if binding.scope_kind == "facility" and binding.facility_id == facility_id:
+    member_facilities = active_membership_facilities(context)
+    for grant in context.grants:
+        if permission not in grant.permissions:
+            continue
+        binding = grant.binding
+        if binding.scope_kind == "facility" and binding.facility_id == facility_id:
+            if facility_id in member_facilities:
                 return True
-    for binding in context.bindings:
-        if binding.scope_kind == "platform" and binding.facility_id is None:
+        elif binding.scope_kind == "platform" and binding.facility_id is None:
             return True
     return False
 
 
 def accessible_facility_ids(context: AccessContext, permission: str) -> set[UUID]:
-    if permission not in context.permissions:
-        return set()
     member_facilities = active_membership_facilities(context)
     scoped: set[UUID] = set()
     platform_wide = False
-    for binding in context.bindings:
+    for grant in context.grants:
+        if permission not in grant.permissions:
+            continue
+        binding = grant.binding
         if binding.scope_kind == "facility" and binding.facility_id in member_facilities:
             scoped.add(binding.facility_id)
         elif binding.scope_kind == "platform" and binding.facility_id is None:

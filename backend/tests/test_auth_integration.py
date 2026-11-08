@@ -14,6 +14,7 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import DBAPIError
 
 from tunza import create_app
+from tunza.access import accessible_facility_ids, facility_scope_allows, load_access_context
 from tunza.config import postgres_url
 from tunza.extensions import db
 from tunza.identity.models import (
@@ -74,7 +75,7 @@ def identity_app():
 def identity(identity_app):
     with identity_app.app_context():
         roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
-        for code in ("VHT", "AUTHOR", "PA"):
+        for code in ("VHT", "FA", "AUTHOR", "PA"):
             assert code in roles, f"missing seeded role {code}"
         assert (
             db.session.scalar(select(Permission).where(Permission.code == "facility.read"))
@@ -112,29 +113,51 @@ def identity(identity_app):
             "disabled": make_user("tst.disabled", "Test Disabled", status="disabled"),
             "bumpable": make_user("tst.bump", "Test Bumpable"),
             "revocable": make_user("tst.revocable", "Test Revocable"),
+            "multi": make_user("tst.multi", "Test Multi Role"),
+            "mixed": make_user("tst.mixed", "Test Mixed Scope"),
+            "stale": make_user("tst.stale", "Test Stale Binding"),
+            "lapsed": make_user("tst.lapsed", "Test Lapsed Membership"),
+            "mismatch": make_user("tst.mismatch", "Test Scope Mismatch"),
         }
 
         now = datetime.now(UTC)
 
-        def bind(user: User, role_code: str, scope_kind: str, facility: Facility | None = None):
+        def bind(
+            user: User,
+            role_code: str,
+            scope_kind: str,
+            facility: Facility | None = None,
+            *,
+            starts_at: datetime | None = None,
+            ends_at: datetime | None = None,
+        ):
             binding = RoleBinding(
                 user_id=user.id,
                 role_id=roles[role_code].id,
                 facility_id=facility.id if facility is not None else None,
                 scope_kind=scope_kind,
-                starts_at=now,
+                starts_at=starts_at or now,
+                ends_at=ends_at,
                 granted_by=users["pa"].id,
             )
             db.session.add(binding)
             db.session.flush()
             return binding
 
-        def member(user: User, facility: Facility) -> FacilityMembership:
+        def member(
+            user: User,
+            facility: Facility,
+            *,
+            status: str = "active",
+            starts_at: datetime | None = None,
+            ends_at: datetime | None = None,
+        ) -> FacilityMembership:
             membership = FacilityMembership(
                 user_id=user.id,
                 facility_id=facility.id,
-                status="active",
-                starts_at=now,
+                status=status,
+                starts_at=starts_at or now,
+                ends_at=ends_at,
             )
             db.session.add(membership)
             db.session.flush()
@@ -148,6 +171,32 @@ def identity(identity_app):
         bind(users["author"], "AUTHOR", "programme")
         revocable_binding = bind(users["revocable"], "VHT", "facility", facilities["TST-A"])
         revocable_membership = member(users["revocable"], facilities["TST-A"])
+
+        bind(users["multi"], "VHT", "facility", facilities["TST-A"])
+        member(users["multi"], facilities["TST-A"])
+        bind(users["multi"], "FA", "facility", facilities["TST-B"])
+        member(users["multi"], facilities["TST-B"])
+
+        bind(users["mixed"], "PA", "platform")
+        bind(users["mixed"], "VHT", "facility", facilities["TST-A"])
+        member(users["mixed"], facilities["TST-A"])
+
+        bind(
+            users["stale"],
+            "VHT",
+            "facility",
+            facilities["TST-A"],
+            starts_at=now - timedelta(days=1),
+            ends_at=now - timedelta(seconds=1),
+        )
+        member(users["stale"], facilities["TST-A"])
+
+        bind(users["lapsed"], "VHT", "facility", facilities["TST-A"])
+        member(users["lapsed"], facilities["TST-A"], status="ended")
+
+        bind(users["mismatch"], "VHT", "platform")
+        bind(users["mismatch"], "PA", "facility", facilities["TST-A"])
+        member(users["mismatch"], facilities["TST-A"])
 
         snapshot = SimpleNamespace(
             app=identity_app,
@@ -452,3 +501,104 @@ def test_audit_events_reject_updates_and_deletes(client, identity):
                 {"event_id": event.id},
             )
         db.session.rollback()
+
+
+def test_multiple_roles_do_not_leak_permissions_across_facilities(client, identity):
+    _login(client, "tst.multi")
+    listing = client.get("/api/v1/facilities")
+    assert listing.status_code == 200
+    assert [item["code"] for item in listing.json["data"]] == ["TST-A", "TST-B"]
+    me = client.get("/api/v1/auth/me")
+    assert {item["role_code"] for item in me.json["data"]["bindings"]} == {"VHT", "FA"}
+
+    with identity.app.app_context():
+        user = db.session.get(User, identity.user_ids["multi"])
+        context = load_access_context(user)
+        facility_a = identity.facility_ids["TST-A"]
+        facility_b = identity.facility_ids["TST-B"]
+
+        assert accessible_facility_ids(context, "patient.read") == {facility_a}
+        assert facility_scope_allows(context, facility_a, "patient.read") is True
+        assert facility_scope_allows(context, facility_b, "patient.read") is False
+
+        assert accessible_facility_ids(context, "membership.manage") == {facility_b}
+        assert facility_scope_allows(context, facility_b, "membership.manage") is True
+        assert facility_scope_allows(context, facility_a, "membership.manage") is False
+
+
+def test_platform_binding_does_not_amplify_facility_scoped_permissions(client, identity):
+    _login(client, "tst.mixed")
+    listing = client.get("/api/v1/facilities")
+    assert listing.status_code == 200
+    assert [item["code"] for item in listing.json["data"]] == ["TST-A", "TST-B", "TST-C"]
+
+    with identity.app.app_context():
+        user = db.session.get(User, identity.user_ids["mixed"])
+        context = load_access_context(user)
+        facility_a = identity.facility_ids["TST-A"]
+        facility_b = identity.facility_ids["TST-B"]
+        facility_c = identity.facility_ids["TST-C"]
+        all_active = {facility_a, facility_b, facility_c}
+
+        assert accessible_facility_ids(context, "facility.read") == all_active
+        assert accessible_facility_ids(context, "membership.manage") == all_active
+        assert facility_scope_allows(context, facility_b, "membership.manage") is True
+
+        assert "patient.read" in context.permissions
+        assert accessible_facility_ids(context, "patient.read") == {facility_a}
+        assert facility_scope_allows(context, facility_a, "patient.read") is True
+        assert facility_scope_allows(context, facility_b, "patient.read") is False
+
+
+def test_expired_binding_yields_no_grants_and_fails_closed(client, identity):
+    _login(client, "tst.stale")
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json["data"]["bindings"] == []
+    assert me.json["data"]["permissions"] == []
+    assert client.get("/api/v1/facilities").status_code == 403
+
+    with identity.app.app_context():
+        user = db.session.get(User, identity.user_ids["stale"])
+        context = load_access_context(user)
+        assert context.grants == ()
+        assert accessible_facility_ids(context, "facility.read") == set()
+        assert (
+            facility_scope_allows(context, identity.facility_ids["TST-A"], "facility.read") is False
+        )
+
+
+def test_ended_membership_blocks_facility_scoped_permissions(client, identity):
+    _login(client, "tst.lapsed")
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert "patient.read" in me.json["data"]["permissions"]
+    assert client.get("/api/v1/facilities").json["data"] == []
+    assert client.get(f"/api/v1/facilities/{identity.facility_ids['TST-A']}").status_code == 404
+
+    with identity.app.app_context():
+        user = db.session.get(User, identity.user_ids["lapsed"])
+        context = load_access_context(user)
+        assert "patient.read" in context.permissions
+        assert accessible_facility_ids(context, "patient.read") == set()
+        assert (
+            facility_scope_allows(context, identity.facility_ids["TST-A"], "patient.read") is False
+        )
+
+
+def test_scope_mismatched_bindings_are_excluded_and_fail_closed(client, identity):
+    _login(client, "tst.mismatch")
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json["data"]["bindings"] == []
+    assert me.json["data"]["permissions"] == []
+    assert client.get("/api/v1/facilities").status_code == 403
+
+    with identity.app.app_context():
+        user = db.session.get(User, identity.user_ids["mismatch"])
+        context = load_access_context(user)
+        assert context.grants == ()
+        assert accessible_facility_ids(context, "facility.read") == set()
+        assert (
+            facility_scope_allows(context, identity.facility_ids["TST-A"], "facility.read") is False
+        )

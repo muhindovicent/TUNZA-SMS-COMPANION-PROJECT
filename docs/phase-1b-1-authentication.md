@@ -12,7 +12,7 @@ This milestone adds staff sign-in, server-side sessions, role-based permissions,
 - CSRF protection for every mutating `/api/v1/` request: session-bound tokens after sign-in, signed expiring pre-auth nonce tokens before sign-in, enforced server-side before any view runs.
 - In-process sliding-window login rate limiting (per IP and per identifier) with `429` and `Retry-After`.
 - PostgreSQL models and Alembic migration `0002_identity_and_access` for `users`, `roles`, `permissions`, `role_permissions`, `facilities`, `facility_memberships`, `role_bindings`, `auth_sessions`, and `audit_events`, plus deterministic role/permission seeds and an append-only audit trigger.
-- RBAC with facility isolation: `require_permission` returns `401`/`403` with a denied audit event; facility scope requires both an active membership and a facility-scoped binding; platform scope grants facility metadata access; out-of-scope facility detail requests return `404` so facility existence is not disclosed.
+- RBAC with facility isolation: each active role binding is evaluated against its own role's permissions and its declared scope (binding scope must match the role definition; mismatched bindings are ignored); `require_permission` returns `401`/`403` with a denied audit event; facility scope requires both an active membership and a facility-scoped binding that itself grants the permission, so permissions never inherit across facilities or from unrelated platform bindings; platform scope grants facility metadata access only for permissions the platform role holds; out-of-scope facility detail requests return `404` so facility existence is not disclosed.
 - A responsive staff sign-in page and a signed-in shell that shows the user's name, role badges, facility badges, and a sign-out action.
 - A synthetic development seed command. There is no public self-registration endpoint.
 
@@ -69,7 +69,7 @@ The seed command prints one-time synthetic passwords for `synthetic.pa`, `synthe
 ## Verification
 
 - Frontend: `npm run typecheck`, `npm run lint`, `npm run test:coverage`, `npm run build` — 25 tests across the session shell, sign-in page, and health API.
-- Backend: `python -m ruff check .`, `python -m ruff format --check .`, `python -m pytest --cov=tunza --cov-report=term-missing` — 56 tests, of which 15 require `TEST_DATABASE_URL` (the Phase 1B migration round-trip plus 14 authentication/RBAC/CSRF/session/audit integration tests). The integration suite creates its schema from migrations, seeds synthetic staff itself, and drops back to base afterwards so the migration test still sees an empty database.
+- Backend: `python -m ruff check .`, `python -m ruff format --check .`, `python -m pytest --cov=tunza --cov-report=term-missing` — 61 tests, of which 20 require `TEST_DATABASE_URL` (the Phase 1B migration round-trip plus 19 authentication/RBAC/CSRF/session/audit integration tests, including multi-role cross-facility scoping, platform/facility permission isolation, expired bindings, ended memberships, and scope-mismatch fail-closed cases). The integration suite creates its schema from migrations, seeds synthetic staff itself, and drops back to base afterwards so the migration test still sees an empty database.
 - CI runs the same commands on every push and pull request to `main`; see the [CI verification guide](ci-verification.md).
 
 ## Out of scope
