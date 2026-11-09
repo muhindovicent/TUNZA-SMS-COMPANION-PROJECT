@@ -68,8 +68,8 @@ The seed command prints one-time synthetic passwords for `synthetic.pa`, `synthe
 
 ## Verification
 
-- Frontend: `npm run typecheck`, `npm run lint`, `npm run test:coverage`, `npm run build` — 25 tests across the session shell, sign-in page, and health API.
-- Backend: `python -m ruff check .`, `python -m ruff format --check .`, `python -m pytest --cov=tunza --cov-report=term-missing` — 61 tests, of which 20 require `TEST_DATABASE_URL` (the Phase 1B migration round-trip plus 19 authentication/RBAC/CSRF/session/audit integration tests, including multi-role cross-facility scoping, platform/facility permission isolation, expired bindings, ended memberships, and scope-mismatch fail-closed cases). The integration suite creates its schema from migrations, seeds synthetic staff itself, and drops back to base afterwards so the migration test still sees an empty database.
+- Frontend: `npm run typecheck`, `npm run lint`, `npm run test:coverage`, `npm run build` — 36 tests across the session shell, sign-in page, activation page, health API, and administration panel.
+- Backend: `python -m ruff check .`, `python -m ruff format --check .`, `python -m pytest --cov=tunza --cov-report=term-missing` — 78 tests, of which 37 require `TEST_DATABASE_URL` (the Phase 1B migration round-trip plus authentication/RBAC/CSRF/session/audit and Phase 1B-2 administration integration tests, including multi-role cross-facility scoping, platform/facility permission isolation, expired bindings, ended memberships, scope-mismatch fail-closed cases, single-binding delegation authority (no FA+PA combination), inactive-membership facility denial, and delegation/escalation controls). The integration suite creates its schema from migrations, seeds synthetic staff itself, and drops back to base afterwards so the migration test still sees an empty database.
 - CI runs the same commands on every push and pull request to `main`; see the [CI verification guide](ci-verification.md).
 
 ## Out of scope

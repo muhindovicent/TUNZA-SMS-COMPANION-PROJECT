@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from flask import Response, current_app, g, jsonify, request
 from sqlalchemy import select
 from werkzeug.exceptions import abort
@@ -16,8 +18,9 @@ from tunza.audit import record_audit
 from tunza.csrf import issue_csrf_token, issue_pre_auth_csrf
 from tunza.extensions import db
 from tunza.identity import auth_blueprint, facilities_blueprint
-from tunza.identity.models import Facility, Role, User
-from tunza.identity.passwords import discard_password_verification, verify_password
+from tunza.identity.admin import _hash_activation_token
+from tunza.identity.models import AuthSession, Facility, Role, User
+from tunza.identity.passwords import discard_password_verification, hash_password, verify_password
 from tunza.identity.sessions import (
     clear_session_cookie,
     create_session,
@@ -31,6 +34,7 @@ GENERIC_LOGIN_FAILURE = "Sign-in details could not be verified."
 SERVICE_ACTOR = "tunza-api"
 MAX_LOGIN_IDENTIFIER_LENGTH = 254
 MAX_PASSWORD_LENGTH = 1024
+PASSWORD_MIN_LENGTH = 12
 
 
 def _error(code: str, message: str, status: int) -> tuple[Response, int]:
@@ -186,6 +190,78 @@ def logout() -> Response:
     response = Response(status=204)
     clear_session_cookie(response)
     return response
+
+
+@auth_blueprint.post("/activations")
+def activate_account() -> tuple[Response, int]:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error("validation_failed", "A JSON request body is required.", 422)
+    if set(payload) - {"token", "new_password"}:
+        return _error("validation_failed", "Request validation failed.", 422)
+    token = payload.get("token")
+    new_password = payload.get("new_password")
+    if not isinstance(token, str) or not token or len(token) > 512:
+        return _error("validation_failed", "Request validation failed.", 422)
+    if not isinstance(new_password, str) or not (
+        PASSWORD_MIN_LENGTH <= len(new_password) <= MAX_PASSWORD_LENGTH
+    ):
+        return _error(
+            "validation_failed",
+            "Password must be at least 12 characters.",
+            422,
+        )
+
+    digest = _hash_activation_token(token)
+    user = db.session.scalar(select(User).where(User.activation_token_hash == digest))
+    now = datetime.now(UTC)
+    if (
+        user is None
+        or user.status != "invited"
+        or user.activation_expires_at is None
+        or user.activation_expires_at <= now
+    ):
+        record_audit(
+            permission="auth",
+            action="activate",
+            resource_type="user",
+            outcome="denied",
+            request_id=g.request_id,
+            actor_id=user.id if user is not None else None,
+            service_actor=SERVICE_ACTOR,
+            metadata={"reason": "invalid_or_expired_token"},
+        )
+        db.session.commit()
+        return _error("invalid_token", "That activation link is no longer valid.", 400)
+
+    user.password_hash = hash_password(new_password)
+    user.status = "active"
+    user.activation_token_hash = None
+    user.activation_expires_at = None
+    user.security_version += 1
+    for record in db.session.scalars(
+        select(AuthSession).where(
+            AuthSession.user_id == user.id,
+            AuthSession.state == "active",
+        )
+    ).all():
+        revoke_session(record)
+
+    record_audit(
+        permission="auth",
+        action="activate",
+        resource_type="user",
+        outcome="success",
+        request_id=g.request_id,
+        actor_id=user.id,
+        service_actor=SERVICE_ACTOR,
+        resource_id=user.id,
+        metadata={"state": "activated"},
+    )
+    db.session.commit()
+    response = jsonify(data={"state": "activated", "mfa_required": False, "user_id": str(user.id)})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
 
 
 @auth_blueprint.get("/me")

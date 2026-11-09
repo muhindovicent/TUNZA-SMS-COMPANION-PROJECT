@@ -27,12 +27,14 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     )
 
     from tunza.health import blueprint as health_blueprint
-    from tunza.identity import auth_blueprint, facilities_blueprint
+    from tunza.identity import admin as identity_admin  # noqa: F401
+    from tunza.identity import admin_blueprint, auth_blueprint, facilities_blueprint
     from tunza.identity import routes as identity_routes  # noqa: F401
 
     app.register_blueprint(health_blueprint, url_prefix="/api/v1/health")
     app.register_blueprint(auth_blueprint)
     app.register_blueprint(facilities_blueprint)
+    app.register_blueprint(admin_blueprint)
 
     from tunza.commands import seed_synthetic_identity
 

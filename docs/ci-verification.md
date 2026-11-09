@@ -68,7 +68,7 @@ The full backend suite runs with `TEST_DATABASE_URL` and `TEST_MIGRATION_DATABAS
 
 ## Results and troubleshooting
 
-Open the run from the Actions page to inspect each named step. Frontend coverage and pytest results appear in the job logs. The current foundation has 25 frontend tests and 61 backend tests, including 20 PostgreSQL integration tests; future authorized changes may increase those counts.
+Open the run from the Actions page to inspect each named step. Frontend coverage and pytest results appear in the job logs. The current foundation has 36 frontend tests and 78 backend tests, including 37 PostgreSQL integration tests; future authorized changes may increase those counts.
 
 If a check fails, fix the underlying dependency, formatting, build, configuration or test problem and push a new commit. Do not suppress failures, remove integration tests, relax database guards, or change advisory thresholds merely to make the workflow green. Hosted-run success is reported only after inspecting the actual run.
 

@@ -115,7 +115,9 @@ export default function LoginPage({ onSignedIn, notice }: LoginPageProps) {
               {submitting ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
-          <p className="auth-footnote">Synthetic development data only</p>
+          <p className="auth-footnote">
+            Synthetic development data only · <a href="#activate">Activate account</a>
+          </p>
         </section>
       </main>
 

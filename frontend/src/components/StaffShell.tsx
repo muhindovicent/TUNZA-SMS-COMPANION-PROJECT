@@ -3,12 +3,16 @@ import { loadFoundationStatus } from '../api/health'
 import type { FoundationStatus } from '../api/health'
 import { logout } from '../api/auth'
 import type { StaffIdentity } from '../api/auth'
+import { hasAdminPermission } from '../api/admin'
+import AdminPanel from './AdminPanel'
 import BrandMark from './BrandMark'
 
 interface StaffShellProps {
   identity: StaffIdentity
   onSignedOut: () => void
 }
+
+type ShellView = 'overview' | 'admin'
 
 function ConnectionCard({
   title,
@@ -55,6 +59,8 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
   const [attempt, setAttempt] = useState(0)
   const [signingOut, setSigningOut] = useState(false)
   const [signOutError, setSignOutError] = useState<string | null>(null)
+  const [view, setView] = useState<ShellView>('overview')
+  const showAdmin = hasAdminPermission(identity.permissions)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -103,8 +109,22 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
           </span>
         </a>
         <nav aria-label="Main navigation">
-          <a href="#connection">Connection</a>
-          <a href="#scope">Milestone</a>
+          <button
+            type="button"
+            className={view === 'overview' ? 'nav-link is-active' : 'nav-link'}
+            onClick={() => setView('overview')}
+          >
+            Overview
+          </button>
+          {showAdmin ? (
+            <button
+              type="button"
+              className={view === 'admin' ? 'nav-link is-active' : 'nav-link'}
+              onClick={() => setView('admin')}
+            >
+              Administration
+            </button>
+          ) : null}
         </nav>
         <div className="user-cluster">
           <span className="user-summary">
@@ -139,6 +159,10 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
       </header>
 
       <main id="main-content">
+        {view === 'admin' && showAdmin ? (
+          <AdminPanel identity={identity} />
+        ) : (
+          <>
         <section className="hero content-width" id="overview" aria-labelledby="hero-title">
           <div className="eyebrow">
             <span aria-hidden="true" />
@@ -154,9 +178,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
             considered step at a time.
           </p>
           <div className="hero-meta">
-            <span>Phase 1B-1</span>
+            <span>Phase 1B-2</span>
             <span className="meta-divider" />
-            Staff authentication and facility access
+            Staff administration and facility access
           </div>
         </section>
 
@@ -215,13 +239,15 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
             <span className="synthetic-label">Synthetic development data only</span>
           </div>
         </section>
+          </>
+        )}
       </main>
 
       <footer className="site-footer content-width">
         <span>
           <strong>TUNZA</strong> · A Zest Technologies project
         </span>
-        <span>Phase 1B-1 · Local development</span>
+        <span>Phase 1B-2 · Local development</span>
       </footer>
     </div>
   )

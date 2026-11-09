@@ -51,3 +51,20 @@ export async function loadIdentity(signal?: AbortSignal): Promise<StaffIdentity 
 export async function logout(): Promise<void> {
   await apiFetch<void>('/auth/logout', { method: 'POST' })
 }
+
+export interface ActivationResult {
+  state: string
+  mfa_required: boolean
+}
+
+export async function activateAccount(
+  token: string,
+  newPassword: string,
+  signal?: AbortSignal,
+): Promise<ActivationResult> {
+  return apiFetch<ActivationResult>('/auth/activations', {
+    method: 'POST',
+    body: { token, new_password: newPassword },
+    signal,
+  })
+}

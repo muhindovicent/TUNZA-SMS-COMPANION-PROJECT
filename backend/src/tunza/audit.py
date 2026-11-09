@@ -10,7 +10,16 @@ from tunza.extensions import db
 from tunza.identity.models import AuditEvent
 
 ALLOWED_METADATA_KEYS = frozenset(
-    {"reason", "state", "role_code", "scope_kind", "facility_code", "endpoint", "method"}
+    {
+        "reason",
+        "state",
+        "role_code",
+        "scope_kind",
+        "facility_code",
+        "endpoint",
+        "method",
+        "login_identifier",
+    }
 )
 MAX_METADATA_KEYS = 10
 MAX_METADATA_VALUE_LENGTH = 200
