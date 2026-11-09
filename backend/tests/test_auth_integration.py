@@ -477,7 +477,9 @@ def test_revoking_membership_and_binding_removes_facility_access(client, identit
     with identity.app.app_context():
         binding = db.session.get(RoleBinding, identity.revocable_binding_id)
         assert binding is not None
-        binding.ends_at = datetime.now(UTC) - timedelta(seconds=1)
+        expired_at = datetime.now(UTC)
+        binding.starts_at = expired_at - timedelta(days=1)
+        binding.ends_at = expired_at - timedelta(seconds=1)
         db.session.commit()
     assert client.get("/api/v1/facilities").status_code == 403
 
