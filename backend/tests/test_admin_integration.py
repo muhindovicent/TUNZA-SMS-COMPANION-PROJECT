@@ -6,6 +6,7 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from sqlalchemy import inspect, select
@@ -586,3 +587,301 @@ def test_duplicate_login_and_invalid_activation_are_generic(client, admin_seed):
     )
     assert invalid.status_code == 400
     assert invalid.json["error"]["code"] == "invalid_token"
+
+
+def test_revoking_future_dated_binding_never_activates(client, admin_seed):
+    """A revoked future grant must never become active; ends_at stays > starts_at."""
+    _login(client, "adm.fa.a")
+    future_start = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    created = _post(
+        client,
+        "/api/v1/role-bindings",
+        {
+            "user_id": admin_seed.user_ids["already"],
+            "role_code": "VHT",
+            "scope_kind": "facility",
+            "facility_id": admin_seed.facility_ids["ADM-A"],
+            "starts_at": future_start,
+        },
+        expect=201,
+    )
+    binding_id = created.json["data"]["id"]
+    assert created.json["data"]["ends_at"] is None
+
+    revoked = _post(
+        client,
+        f"/api/v1/role-bindings/{binding_id}/revoke",
+        {"reason": "synthetic future revoke"},
+        expect=200,
+    )
+    ends_at_raw = revoked.json["data"]["ends_at"]
+    starts_at_raw = revoked.json["data"]["starts_at"]
+    assert ends_at_raw is not None
+    ends_at = datetime.fromisoformat(ends_at_raw)
+    starts_at = datetime.fromisoformat(starts_at_raw)
+    now = datetime.now(UTC)
+    # Closed at revoke time so starts_at <= now < ends_at can never hold later.
+    assert ends_at <= now
+    assert ends_at > starts_at
+    assert starts_at < now
+
+    with admin_seed.app.app_context():
+        binding = db.session.get(RoleBinding, UUID(binding_id))
+        assert binding is not None
+        assert binding.ends_at is not None
+        assert binding.ends_at > binding.starts_at
+        # Access evaluation must not treat the binding as active.
+        from tunza.access import load_access_context
+
+        user = db.session.get(User, admin_seed.user_ids["already"])
+        context = load_access_context(user)
+        assert binding_id not in {str(item.id) for item in context.bindings}
+
+    again = _post(
+        client,
+        f"/api/v1/role-bindings/{binding_id}/revoke",
+        {"reason": "already revoked"},
+        expect=409,
+    )
+    assert again.status_code == 409
+
+
+def test_fa_cannot_disable_shared_or_global_accounts(client, admin_seed):
+    """Facility admins cannot disable multi-facility or platform-scoped staff."""
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        # Shared staff: active membership at both ADM-A and ADM-B.
+        shared = User(
+            login_identifier="adm.shared.staff",
+            display_name="Admin Shared Staff",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(shared)
+        db.session.flush()
+        for code in ("ADM-A", "ADM-B"):
+            db.session.add(
+                FacilityMembership(
+                    user_id=shared.id,
+                    facility_id=admin_seed.facility_ids[code],
+                    status="active",
+                    starts_at=now,
+                    ends_at=None,
+                )
+            )
+        # Global staff: platform-scoped PA binding with membership only at ADM-A.
+        global_staff = User(
+            login_identifier="adm.global.staff",
+            display_name="Admin Global Staff",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(global_staff)
+        db.session.flush()
+        db.session.add(
+            FacilityMembership(
+                user_id=global_staff.id,
+                facility_id=admin_seed.facility_ids["ADM-A"],
+                status="active",
+                starts_at=now,
+                ends_at=None,
+            )
+        )
+        db.session.add(
+            RoleBinding(
+                user_id=global_staff.id,
+                role_id=roles["PA"].id,
+                facility_id=None,
+                scope_kind="platform",
+                starts_at=now,
+                ends_at=None,
+                granted_by=admin_seed.user_ids["pa"],
+            )
+        )
+        db.session.commit()
+        shared_id = str(shared.id)
+        global_id = str(global_staff.id)
+
+    _login(client, "adm.fa.a")
+
+    shared_listing = client.get("/api/v1/users")
+    assert shared_listing.status_code == 200
+    logins = {item["login_identifier"] for item in shared_listing.json["data"]}
+    assert "adm.shared.staff" in logins
+
+    denied_shared = client.patch(
+        f"/api/v1/users/{shared_id}",
+        json={"status": "disabled", "reason": "synthetic shared disable"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert denied_shared.status_code == 403
+    assert denied_shared.json["error"]["code"] == "forbidden"
+
+    denied_global = client.patch(
+        f"/api/v1/users/{global_id}",
+        json={"status": "disabled", "reason": "synthetic global disable"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert denied_global.status_code == 403
+
+    with admin_seed.app.app_context():
+        shared = db.session.get(User, UUID(shared_id))
+        global_staff = db.session.get(User, UUID(global_id))
+        assert shared is not None and shared.status == "active"
+        assert global_staff is not None and global_staff.status == "active"
+        denied_events = list(
+            db.session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action == "account.state",
+                    AuditEvent.outcome == "denied",
+                )
+            ).all()
+        )
+        assert any(
+            event.event_metadata.get("reason") == "shared_or_global_account"
+            for event in denied_events
+        )
+
+    # Platform administrator may still disable the shared account.
+    client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": _csrf(client)})
+    _login(client, "adm.pa")
+    allowed = _patch(
+        client,
+        f"/api/v1/users/{shared_id}",
+        {"status": "disabled", "reason": "synthetic pa disable"},
+        expect=200,
+    )
+    assert allowed.json["data"]["status"] == "disabled"
+
+    # Out-of-scope-only targets remain 404 for the facility admin.
+    client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": _csrf(client)})
+    _login(client, "adm.fa.a")
+    missing = client.patch(
+        f"/api/v1/users/{admin_seed.user_ids['vht_b']}",
+        json={"status": "disabled", "reason": "cross facility"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert missing.status_code == 404
+
+
+def test_role_revocation_applies_delegation_allowlists(client, admin_seed):
+    """Revoke uses the same allowlists as grant for clinical and platform roles."""
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        # PA-owned clinical binding that PA must not be allowed to revoke.
+        clinical_target = db.session.get(User, admin_seed.user_ids["vht_a"])
+        clinical_binding = RoleBinding(
+            user_id=clinical_target.id,
+            role_id=roles["VHT"].id,
+            facility_id=admin_seed.facility_ids["ADM-A"],
+            scope_kind="facility",
+            starts_at=now,
+            ends_at=None,
+            granted_by=admin_seed.user_ids["pa"],
+        )
+        # Programme binding that only platform-scope holders may revoke.
+        programme_binding = RoleBinding(
+            user_id=admin_seed.user_ids["author"],
+            role_id=roles["AUTHOR"].id,
+            facility_id=None,
+            scope_kind="programme",
+            starts_at=now,
+            ends_at=None,
+            granted_by=admin_seed.user_ids["pa"],
+        )
+        db.session.add_all([clinical_binding, programme_binding])
+        db.session.commit()
+        clinical_id = str(clinical_binding.id)
+        programme_id = str(programme_binding.id)
+
+    # PA cannot revoke protected clinical role VHT (same ban as grant).
+    _login(client, "adm.pa")
+    pa_denied = client.post(
+        f"/api/v1/role-bindings/{clinical_id}/revoke",
+        json={"reason": "synthetic pa clinical revoke"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert pa_denied.status_code == 403
+    assert pa_denied.json["error"]["code"] == "forbidden"
+
+    # FA lacks platform scope for programme bindings → 404, not silent success.
+    client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": _csrf(client)})
+    _login(client, "adm.fa.a")
+    fa_denied = client.post(
+        f"/api/v1/role-bindings/{programme_id}/revoke",
+        json={"reason": "synthetic fa programme revoke"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert fa_denied.status_code == 404
+
+    # FA may revoke an in-scope facility care role at their own facility.
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        revokeable = RoleBinding(
+            user_id=admin_seed.user_ids["already"],
+            role_id=roles["VHT"].id,
+            facility_id=admin_seed.facility_ids["ADM-A"],
+            scope_kind="facility",
+            starts_at=now,
+            ends_at=None,
+            granted_by=admin_seed.user_ids["fa_a"],
+        )
+        db.session.add(revokeable)
+        db.session.commit()
+        revokeable_id = str(revokeable.id)
+
+    fa_ok = _post(
+        client,
+        f"/api/v1/role-bindings/{revokeable_id}/revoke",
+        {"reason": "synthetic fa care revoke"},
+        expect=200,
+    )
+    assert fa_ok.json["data"]["ends_at"] is not None
+
+    # PA may revoke platform-scope roles inside the PA allowlist (e.g. another PA).
+    client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": _csrf(client)})
+    _login(client, "adm.pa")
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        pa_binding = RoleBinding(
+            user_id=admin_seed.user_ids["target"],
+            role_id=roles["PA"].id,
+            facility_id=None,
+            scope_kind="platform",
+            starts_at=now,
+            ends_at=None,
+            granted_by=admin_seed.user_ids["pa"],
+        )
+        db.session.add(pa_binding)
+        db.session.commit()
+        pa_binding_id = str(pa_binding.id)
+
+    pa_ok = _post(
+        client,
+        f"/api/v1/role-bindings/{pa_binding_id}/revoke",
+        {"reason": "synthetic pa revoke"},
+        expect=200,
+    )
+    assert pa_ok.json["data"]["ends_at"] is not None
+
+    with admin_seed.app.app_context():
+        clinical = db.session.get(RoleBinding, UUID(clinical_id))
+        assert clinical is not None and clinical.ends_at is None
+        programme = db.session.get(RoleBinding, UUID(programme_id))
+        assert programme is not None and programme.ends_at is None
+        denied_events = list(
+            db.session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action == "role.revoke",
+                    AuditEvent.outcome == "denied",
+                )
+            ).all()
+        )
+        assert any(
+            event.event_metadata.get("reason") == "delegation_not_allowed"
+            for event in denied_events
+        )

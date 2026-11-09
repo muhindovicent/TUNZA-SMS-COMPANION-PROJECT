@@ -26,3 +26,10 @@ def may_create_binding_scope(grantor_role_codes: set[str], role: Role, scope_kin
     if scope_kind != role.scope_kind:
         return False
     return may_delegate_role(grantor_role_codes, role)
+
+
+def may_revoke_binding(grantor_role_codes: set[str], role: Role, binding_scope_kind: str) -> bool:
+    """Revocation uses the same allowlists as grant, including protected roles."""
+    if binding_scope_kind != role.scope_kind:
+        return False
+    return may_delegate_role(grantor_role_codes, role)

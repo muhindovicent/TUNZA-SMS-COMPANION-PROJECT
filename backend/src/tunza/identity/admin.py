@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from flask import Response, g, jsonify, request
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from werkzeug.exceptions import abort
 
 from tunza.access import (
@@ -20,7 +20,7 @@ from tunza.access import (
 from tunza.audit import record_audit
 from tunza.extensions import db
 from tunza.identity import admin_blueprint
-from tunza.identity.delegation import may_create_binding_scope
+from tunza.identity.delegation import may_create_binding_scope, may_revoke_binding
 from tunza.identity.models import (
     AuthSession,
     Facility,
@@ -305,16 +305,22 @@ def update_account_state(user_id: UUID) -> Response:
     platform_wide = _holds_platform_permission(context, "account.provision")
     if not platform_wide:
         managed = accessible_facility_ids(context, "account.provision")
+        now = datetime.now(UTC)
         if not managed:
-            member_of_managed = None
+            target_memberships: list[FacilityMembership] = []
         else:
-            member_of_managed = db.session.scalar(
-                select(FacilityMembership.id).where(
-                    FacilityMembership.user_id == user.id,
-                    FacilityMembership.facility_id.in_(managed),
-                    FacilityMembership.status == "active",
-                )
+            target_memberships = list(
+                db.session.scalars(
+                    select(FacilityMembership).where(
+                        FacilityMembership.user_id == user.id,
+                        FacilityMembership.status == "active",
+                    )
+                ).all()
             )
+        member_of_managed = next(
+            (item for item in target_memberships if item.facility_id in managed),
+            None,
+        )
         if member_of_managed is None:
             _audit_admin(
                 permission="account.provision",
@@ -327,6 +333,35 @@ def update_account_state(user_id: UUID) -> Response:
             )
             db.session.commit()
             abort(404)
+
+        # Shared or globally scoped staff cannot be managed by a facility-only admin:
+        # deny when the target also reaches facilities outside the admin's authority,
+        # or holds any active platform/programme binding (global staff account).
+        beyond_managed = any(item.facility_id not in managed for item in target_memberships)
+        global_binding = db.session.scalar(
+            select(RoleBinding.id).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.scope_kind.in_(("platform", "programme")),
+                RoleBinding.starts_at <= now,
+                or_(RoleBinding.ends_at.is_(None), RoleBinding.ends_at > now),
+            )
+        )
+        if beyond_managed or global_binding is not None:
+            _audit_admin(
+                permission="account.provision",
+                action="account.state",
+                resource_type="user",
+                outcome="denied",
+                resource_id=user.id,
+                metadata={"reason": "shared_or_global_account"},
+                actor_id=context.user.id,
+            )
+            db.session.commit()
+            return _error(
+                "forbidden",
+                "That account has access beyond your administrative authority.",
+                403,
+            )
 
     if user.id == context.user.id and status == "disabled":
         _audit_admin(
@@ -774,12 +809,38 @@ def revoke_role_binding(binding_id: UUID) -> Response:
             db.session.commit()
             abort(404)
 
+    role = db.session.get(Role, binding.role_id)
+    if role is None:
+        abort(404)
+
+    # Revocation obeys the same delegation allowlists as grant, including protected
+    # clinical and platform roles (PA cannot revoke VHT/HCW/REVIEWER, etc.).
+    grantor_roles = _grantor_role_codes(context)
+    if not may_revoke_binding(grantor_roles, role, binding.scope_kind):
+        _audit_admin(
+            permission="role.delegate",
+            action="role.revoke",
+            resource_type="role_binding",
+            outcome="denied",
+            resource_id=binding.id,
+            facility_id=binding.facility_id,
+            metadata={"reason": "delegation_not_allowed", "role_code": role.code},
+            actor_id=context.user.id,
+        )
+        db.session.commit()
+        return _error("forbidden", "That role is outside your delegation scope.", 403)
+
     if binding.ends_at is not None and binding.ends_at <= datetime.now(UTC):
         return _error("conflict", "That role binding is already revoked.", 409)
 
-    role = db.session.get(Role, binding.role_id)
     now = datetime.now(UTC)
-    binding.ends_at = now if binding.starts_at < now else binding.starts_at + timedelta(seconds=1)
+    if binding.starts_at >= now:
+        # Future-dated binding: close the interval at now while keeping ends_at >
+        # starts_at, so the grant can never become active after revocation.
+        binding.ends_at = now
+        binding.starts_at = now - timedelta(seconds=1)
+    else:
+        binding.ends_at = now
 
     _audit_admin(
         permission="role.delegate",
@@ -788,7 +849,7 @@ def revoke_role_binding(binding_id: UUID) -> Response:
         outcome="success",
         resource_id=binding.id,
         facility_id=binding.facility_id,
-        metadata={"reason": reason, "role_code": role.code if role else None},
+        metadata={"reason": reason, "role_code": role.code},
         actor_id=context.user.id,
     )
     db.session.commit()

@@ -69,7 +69,7 @@ The seed command prints one-time synthetic passwords for `synthetic.pa`, `synthe
 ## Verification
 
 - Frontend: `npm run typecheck`, `npm run lint`, `npm run test:coverage`, `npm run build` — 28 tests across the session shell, sign-in page, health API, and administration panel.
-- Backend: `python -m ruff check .`, `python -m ruff format --check .`, `python -m pytest --cov=tunza --cov-report=term-missing` — 72 tests, of which 31 require `TEST_DATABASE_URL` (the Phase 1B migration round-trip plus authentication/RBAC/CSRF/session/audit and Phase 1B-2 administration integration tests, including multi-role cross-facility scoping, platform/facility permission isolation, expired bindings, ended memberships, scope-mismatch fail-closed cases, and delegation/escalation controls). The integration suite creates its schema from migrations, seeds synthetic staff itself, and drops back to base afterwards so the migration test still sees an empty database.
+- Backend: `python -m ruff check .`, `python -m ruff format --check .`, `python -m pytest --cov=tunza --cov-report=term-missing` — 75 tests, of which 34 require `TEST_DATABASE_URL` (the Phase 1B migration round-trip plus authentication/RBAC/CSRF/session/audit and Phase 1B-2 administration integration tests, including multi-role cross-facility scoping, platform/facility permission isolation, expired bindings, ended memberships, scope-mismatch fail-closed cases, and delegation/escalation controls). The integration suite creates its schema from migrations, seeds synthetic staff itself, and drops back to base afterwards so the migration test still sees an empty database.
 - CI runs the same commands on every push and pull request to `main`; see the [CI verification guide](ci-verification.md).
 
 ## Out of scope
