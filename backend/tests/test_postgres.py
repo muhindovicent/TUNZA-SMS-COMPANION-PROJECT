@@ -53,7 +53,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0002_identity_and_access"
+                assert revision == "0003_staff_administration"
             expected_tables = {
                 "alembic_version",
                 "audit_events",

@@ -67,6 +67,12 @@ class User(db.Model):
     security_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
+    activation_token_hash: Mapped[bytes | None] = mapped_column(
+        LargeBinary(32), nullable=True, unique=True
+    )
+    activation_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

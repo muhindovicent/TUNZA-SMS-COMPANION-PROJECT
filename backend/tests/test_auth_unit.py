@@ -46,5 +46,6 @@ def test_public_registration_routes_do_not_exist(client):
     csrf = client.get("/api/v1/auth/csrf").json["data"]["csrf_token"]
     headers = {"X-CSRF-Token": csrf}
     assert client.post("/api/v1/auth/register", json={}, headers=headers).status_code == 404
-    assert client.post("/api/v1/users", json={}, headers=headers).status_code == 404
     assert client.post("/api/v1/auth/signup", json={}, headers=headers).status_code == 404
+    # Staff provisioning exists but requires an authenticated administrator.
+    assert client.post("/api/v1/users", json={}, headers=headers).status_code == 401
