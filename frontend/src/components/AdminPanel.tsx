@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  createMembership,
   createRoleBinding,
   endMembership,
   listAccounts,
@@ -52,6 +53,11 @@ export default function AdminPanel({ identity }: AdminPanelProps) {
   )
   const [lastToken, setLastToken] = useState<string | null>(null)
 
+  const [membershipUserId, setMembershipUserId] = useState('')
+  const [membershipFacilityId, setMembershipFacilityId] = useState(
+    facilityOptions[0]?.id ?? '',
+  )
+
   const [bindingUserId, setBindingUserId] = useState('')
   const [bindingRoleCode, setBindingRoleCode] = useState('VHT')
   const [bindingFacilityId, setBindingFacilityId] = useState(facilityOptions[0]?.id ?? '')
@@ -60,7 +66,7 @@ export default function AdminPanel({ identity }: AdminPanelProps) {
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
       const results = await Promise.all([
-        canProvision ? listAccounts(signal) : Promise.resolve([]),
+        canProvision || canManageMemberships ? listAccounts(signal) : Promise.resolve([]),
         canManageMemberships ? listMemberships(signal) : Promise.resolve([]),
         canDelegate ? listRoleBindings(signal) : Promise.resolve([]),
       ])
@@ -137,6 +143,18 @@ export default function AdminPanel({ identity }: AdminPanelProps) {
     void run(async () => {
       await endMembership(membership.id, 'synthetic membership end')
     }, 'Membership ended.')
+  }
+
+  function handleCreateMembership(event: FormEvent) {
+    event.preventDefault()
+    void run(async () => {
+      await createMembership({
+        user_id: membershipUserId.trim(),
+        facility_id: membershipFacilityId,
+        starts_at: isoNow(),
+      })
+      setMembershipUserId('')
+    }, 'Facility membership assigned.')
   }
 
   function handleRevokeBinding(binding: AdminRoleBinding) {
@@ -282,6 +300,42 @@ export default function AdminPanel({ identity }: AdminPanelProps) {
       {canManageMemberships ? (
         <article className="admin-card">
           <h3>Facility memberships</h3>
+          <form onSubmit={handleCreateMembership} className="admin-form">
+            <div className="field">
+              <label htmlFor="membership-user">Staff account</label>
+              <select
+                id="membership-user"
+                value={membershipUserId}
+                onChange={(event) => setMembershipUserId(event.target.value)}
+                required
+              >
+                <option value="">Select an account</option>
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.login_identifier} — {account.display_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="membership-facility">Assign to facility</label>
+              <select
+                id="membership-facility"
+                value={membershipFacilityId}
+                onChange={(event) => setMembershipFacilityId(event.target.value)}
+                required
+              >
+                {facilityOptions.map((facility) => (
+                  <option key={facility.id} value={facility.id}>
+                    {facility.code} — {facility.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button type="submit" className="primary-button" disabled={busy || !membershipUserId}>
+              {busy ? 'Working…' : 'Assign membership'}
+            </button>
+          </form>
           <div className="table-wrap">
             <table>
               <thead>

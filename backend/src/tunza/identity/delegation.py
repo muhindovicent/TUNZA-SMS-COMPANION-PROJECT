@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from tunza.identity.models import Role
+from uuid import UUID
+
+from tunza.identity.models import Role, RoleBinding
 
 # Facility administrators may bind only facility-scoped care/admin roles.
 FACILITY_DELEGATABLE_ROLE_CODES = frozenset({"VHT", "HCW", "FA"})
@@ -21,15 +23,25 @@ def may_delegate_role(grantor_role_codes: set[str], role: Role) -> bool:
     return False
 
 
-def may_create_binding_scope(grantor_role_codes: set[str], role: Role, scope_kind: str) -> bool:
-    """Binding scope must match the role definition and fall inside the grantor allowlist."""
-    if scope_kind != role.scope_kind:
+def binding_covers_delegation_scope(
+    binding: RoleBinding,
+    *,
+    target_scope_kind: str,
+    target_facility_id: UUID | None,
+    member_facility_ids: set[UUID],
+) -> bool:
+    """Whether one active binding's scope covers the requested grant/revoke target."""
+    if target_scope_kind == "facility":
+        if target_facility_id is None:
+            return False
+        if binding.scope_kind == "platform" and binding.facility_id is None:
+            return True
+        if (
+            binding.scope_kind == "facility"
+            and binding.facility_id == target_facility_id
+            and target_facility_id in member_facility_ids
+        ):
+            return True
         return False
-    return may_delegate_role(grantor_role_codes, role)
-
-
-def may_revoke_binding(grantor_role_codes: set[str], role: Role, binding_scope_kind: str) -> bool:
-    """Revocation uses the same allowlists as grant, including protected roles."""
-    if binding_scope_kind != role.scope_kind:
-        return False
-    return may_delegate_role(grantor_role_codes, role)
+    # Platform and programme targets require a platform-scope binding.
+    return binding.scope_kind == "platform" and binding.facility_id is None

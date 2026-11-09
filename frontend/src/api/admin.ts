@@ -70,6 +70,13 @@ export function listMemberships(signal?: AbortSignal): Promise<AdminMembership[]
   return apiFetch<AdminMembership[]>('/memberships', { signal })
 }
 
+export function createMembership(
+  body: { user_id: string; facility_id: string; starts_at: string; ends_at?: string },
+  signal?: AbortSignal,
+): Promise<AdminMembership> {
+  return apiFetch<AdminMembership>('/memberships', { method: 'POST', body, signal })
+}
+
 export function endMembership(
   membershipId: string,
   reason: string,

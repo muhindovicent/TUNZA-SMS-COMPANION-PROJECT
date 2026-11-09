@@ -13,6 +13,7 @@ from werkzeug.exceptions import abort
 
 from tunza.access import (
     accessible_facility_ids,
+    active_membership_facilities,
     facility_scope_allows,
     get_access_context,
     require_permission,
@@ -20,7 +21,10 @@ from tunza.access import (
 from tunza.audit import record_audit
 from tunza.extensions import db
 from tunza.identity import admin_blueprint
-from tunza.identity.delegation import may_create_binding_scope, may_revoke_binding
+from tunza.identity.delegation import (
+    binding_covers_delegation_scope,
+    may_delegate_role,
+)
 from tunza.identity.models import (
     AuthSession,
     Facility,
@@ -115,13 +119,6 @@ def _parse_datetime(value: object, *, required: bool) -> datetime | None | str:
     return parsed.astimezone(UTC)
 
 
-def _grantor_role_codes(context) -> set[str]:
-    role_ids = [grant.binding.role_id for grant in context.grants]
-    if not role_ids:
-        return set()
-    return set(db.session.scalars(select(Role.code).where(Role.id.in_(role_ids))).all())
-
-
 def _holds_platform_permission(context, permission: str) -> bool:
     return any(
         grant.binding.scope_kind == "platform"
@@ -129,6 +126,67 @@ def _holds_platform_permission(context, permission: str) -> bool:
         and permission in grant.permissions
         for grant in context.grants
     )
+
+
+def _eligible_delegation_binding(
+    context,
+    *,
+    target_scope_kind: str,
+    target_facility_id: UUID | None,
+    target_role: Role,
+) -> RoleBinding | None:
+    """Find one active binding that grants role.delegate authority over the target.
+
+    The same binding must provide both the permission and a role code inside the
+    delegation allowlist for ``target_role``. FA and PA grants from unrelated
+    bindings are never combined. Facility-level authority additionally requires an
+    active membership at the target facility for facility-scoped bindings.
+    """
+    member_facility_ids = active_membership_facilities(context)
+    role_ids = [grant.binding.role_id for grant in context.grants]
+    role_codes: dict[UUID, str] = {}
+    if role_ids:
+        for role_id, code in db.session.execute(
+            select(Role.id, Role.code).where(Role.id.in_(role_ids))
+        ):
+            role_codes[role_id] = code
+    for grant in context.grants:
+        if "role.delegate" not in grant.permissions:
+            continue
+        binding = grant.binding
+        role_code = role_codes.get(binding.role_id)
+        if role_code is None or not may_delegate_role({role_code}, target_role):
+            continue
+        if not binding_covers_delegation_scope(
+            binding,
+            target_scope_kind=target_scope_kind,
+            target_facility_id=target_facility_id,
+            member_facility_ids=member_facility_ids,
+        ):
+            continue
+        return binding
+    return None
+
+
+def _delegation_scope_covered(
+    context,
+    *,
+    target_scope_kind: str,
+    target_facility_id: UUID | None,
+) -> bool:
+    """Whether any role.delegate binding covers the target scope (ignoring allowlists)."""
+    member_facility_ids = active_membership_facilities(context)
+    for grant in context.grants:
+        if "role.delegate" not in grant.permissions:
+            continue
+        if binding_covers_delegation_scope(
+            grant.binding,
+            target_scope_kind=target_scope_kind,
+            target_facility_id=target_facility_id,
+            member_facility_ids=member_facility_ids,
+        ):
+            return True
+    return False
 
 
 def _audit_admin(
@@ -645,8 +703,7 @@ def create_role_binding() -> tuple[Response, int]:
         db.session.commit()
         return _error("forbidden", "You cannot assign a role to yourself.", 403)
 
-    grantor_roles = _grantor_role_codes(context)
-    if not may_create_binding_scope(grantor_roles, role, scope_kind):
+    if scope_kind != role.scope_kind:
         _audit_admin(
             permission="role.delegate",
             action="role.delegate",
@@ -658,10 +715,18 @@ def create_role_binding() -> tuple[Response, int]:
         db.session.commit()
         return _error("forbidden", "That role is outside your delegation scope.", 403)
 
+    facility_id_for_check: UUID | None = None
     if scope_kind == "facility":
         if facility_id is None:
             return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
-        if not facility_scope_allows(context, facility_id, "role.delegate"):
+        facility_id_for_check = facility_id
+
+    if not _delegation_scope_covered(
+        context,
+        target_scope_kind=scope_kind,
+        target_facility_id=facility_id_for_check,
+    ):
+        if scope_kind == "facility":
             _audit_admin(
                 permission="role.delegate",
                 action="role.delegate",
@@ -673,6 +738,38 @@ def create_role_binding() -> tuple[Response, int]:
             )
             db.session.commit()
             abort(404)
+        _audit_admin(
+            permission="role.delegate",
+            action="role.delegate",
+            resource_type="role_binding",
+            outcome="denied",
+            metadata={"reason": "platform_scope_required", "role_code": role.code},
+            actor_id=context.user.id,
+        )
+        db.session.commit()
+        return _error("forbidden", "That role is outside your delegation scope.", 403)
+
+    # One eligible binding must supply both role.delegate and allowlisted authority.
+    eligible = _eligible_delegation_binding(
+        context,
+        target_scope_kind=scope_kind,
+        target_facility_id=facility_id_for_check,
+        target_role=role,
+    )
+    if eligible is None:
+        _audit_admin(
+            permission="role.delegate",
+            action="role.delegate",
+            resource_type="role_binding",
+            outcome="denied",
+            facility_id=facility_id,
+            metadata={"reason": "delegation_not_allowed", "role_code": role.code},
+            actor_id=context.user.id,
+        )
+        db.session.commit()
+        return _error("forbidden", "That role is outside your delegation scope.", 403)
+
+    if scope_kind == "facility" and facility_id is not None:
         if role.scope_kind == "facility":
             # Require active membership at the target facility for care roles.
             member = db.session.scalar(
@@ -688,21 +785,8 @@ def create_role_binding() -> tuple[Response, int]:
                     "An active facility membership is required before assigning this role.",
                     409,
                 )
-    else:
-        # Platform and programme bindings require platform-scope role.delegate.
-        if not _holds_platform_permission(context, "role.delegate"):
-            _audit_admin(
-                permission="role.delegate",
-                action="role.delegate",
-                resource_type="role_binding",
-                outcome="denied",
-                metadata={"reason": "platform_scope_required", "role_code": role.code},
-                actor_id=context.user.id,
-            )
-            db.session.commit()
-            return _error("forbidden", "That role is outside your delegation scope.", 403)
-        if facility_id is not None:
-            return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    elif facility_id is not None:
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
 
     binding = RoleBinding(
         user_id=user_id,
@@ -779,10 +863,20 @@ def revoke_role_binding(binding_id: UUID) -> Response:
     if binding is None:
         abort(404)
 
-    if binding.scope_kind == "facility":
-        if binding.facility_id is None or not facility_scope_allows(
-            context, binding.facility_id, "role.delegate"
-        ):
+    role = db.session.get(Role, binding.role_id)
+    if role is None:
+        abort(404)
+
+    if binding.scope_kind != role.scope_kind:
+        abort(404)
+
+    facility_id_for_check = binding.facility_id if binding.scope_kind == "facility" else None
+    if not _delegation_scope_covered(
+        context,
+        target_scope_kind=binding.scope_kind,
+        target_facility_id=facility_id_for_check,
+    ):
+        if binding.scope_kind == "facility":
             _audit_admin(
                 permission="role.delegate",
                 action="role.revoke",
@@ -795,28 +889,27 @@ def revoke_role_binding(binding_id: UUID) -> Response:
             )
             db.session.commit()
             abort(404)
-    else:
-        if not _holds_platform_permission(context, "role.delegate"):
-            _audit_admin(
-                permission="role.delegate",
-                action="role.revoke",
-                resource_type="role_binding",
-                outcome="denied",
-                resource_id=binding.id,
-                metadata={"reason": "platform_scope_required"},
-                actor_id=context.user.id,
-            )
-            db.session.commit()
-            abort(404)
-
-    role = db.session.get(Role, binding.role_id)
-    if role is None:
+        _audit_admin(
+            permission="role.delegate",
+            action="role.revoke",
+            resource_type="role_binding",
+            outcome="denied",
+            resource_id=binding.id,
+            metadata={"reason": "platform_scope_required"},
+            actor_id=context.user.id,
+        )
+        db.session.commit()
         abort(404)
 
-    # Revocation obeys the same delegation allowlists as grant, including protected
-    # clinical and platform roles (PA cannot revoke VHT/HCW/REVIEWER, etc.).
-    grantor_roles = _grantor_role_codes(context)
-    if not may_revoke_binding(grantor_roles, role, binding.scope_kind):
+    # Revocation requires the same single eligible binding as grant, including
+    # protected clinical and platform roles (PA cannot revoke VHT/HCW/REVIEWER).
+    eligible = _eligible_delegation_binding(
+        context,
+        target_scope_kind=binding.scope_kind,
+        target_facility_id=facility_id_for_check,
+        target_role=role,
+    )
+    if eligible is None:
         _audit_admin(
             permission="role.delegate",
             action="role.revoke",

@@ -885,3 +885,254 @@ def test_role_revocation_applies_delegation_allowlists(client, admin_seed):
             event.event_metadata.get("reason") == "delegation_not_allowed"
             for event in denied_events
         )
+
+
+def _seed_user_with_bindings(
+    admin_seed,
+    login: str,
+    bindings: list[dict],
+    *,
+    memberships: list[str],
+):
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        user = User(
+            login_identifier=login,
+            display_name=login.replace("adm.", "Admin ").title(),
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(user)
+        db.session.flush()
+        for facility_code in memberships:
+            db.session.add(
+                FacilityMembership(
+                    user_id=user.id,
+                    facility_id=admin_seed.facility_ids[facility_code],
+                    status="active",
+                    starts_at=now,
+                    ends_at=None,
+                )
+            )
+        for spec in bindings:
+            facility = admin_seed.facility_ids[spec["facility"]] if spec.get("facility") else None
+            db.session.add(
+                RoleBinding(
+                    user_id=user.id,
+                    role_id=roles[spec["role"]].id,
+                    facility_id=facility,
+                    scope_kind=spec["scope_kind"],
+                    starts_at=now,
+                    ends_at=None,
+                    granted_by=admin_seed.user_ids["pa"],
+                )
+            )
+        db.session.commit()
+        return str(user.id)
+
+
+def test_fa_and_pa_bindings_do_not_combine_for_clinical_roles(client, admin_seed):
+    """FA allowlist and PA platform coverage from unrelated bindings never combine."""
+    mixed_id = _seed_user_with_bindings(
+        admin_seed,
+        "adm.mixed.fa.pa",
+        [
+            {"role": "FA", "scope_kind": "facility", "facility": "ADM-A"},
+            {"role": "PA", "scope_kind": "platform", "facility": None},
+        ],
+        memberships=["ADM-A"],
+    )
+
+    _login(client, "adm.mixed.fa.pa")
+
+    # PA platform coverage reaches ADM-B, but PA cannot delegate VHT; FA allowlist
+    # alone does not cover ADM-B. No single binding grants both → denied.
+    outside = client.post(
+        "/api/v1/role-bindings",
+        json={
+            "user_id": admin_seed.user_ids["target"],
+            "role_code": "VHT",
+            "scope_kind": "facility",
+            "facility_id": admin_seed.facility_ids["ADM-B"],
+            "starts_at": _iso_now(),
+        },
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert outside.status_code == 403
+    assert outside.json["error"]["code"] == "forbidden"
+
+    # Legitimate in-scope: the FA binding alone covers ADM-A and allows VHT.
+    in_scope = _post(
+        client,
+        "/api/v1/role-bindings",
+        {
+            "user_id": admin_seed.user_ids["already"],
+            "role_code": "VHT",
+            "scope_kind": "facility",
+            "facility_id": admin_seed.facility_ids["ADM-A"],
+            "starts_at": _iso_now(),
+        },
+        expect=201,
+    )
+    assert in_scope.json["data"]["role_code"] == "VHT"
+    granted_id = in_scope.json["data"]["id"]
+
+    # Revoking a clinical binding outside FA facilities is also denied.
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        outside_binding = RoleBinding(
+            user_id=admin_seed.user_ids["vht_b"],
+            role_id=roles["VHT"].id,
+            facility_id=admin_seed.facility_ids["ADM-B"],
+            scope_kind="facility",
+            starts_at=now,
+            ends_at=None,
+            granted_by=admin_seed.user_ids["pa"],
+        )
+        db.session.add(outside_binding)
+        db.session.commit()
+        outside_binding_id = str(outside_binding.id)
+
+    denied_revoke = client.post(
+        f"/api/v1/role-bindings/{outside_binding_id}/revoke",
+        json={"reason": "synthetic cross-facility revoke"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert denied_revoke.status_code == 403
+
+    # Same binding the mixed admin legitimately created can be revoked in-scope.
+    ok_revoke = _post(
+        client,
+        f"/api/v1/role-bindings/{granted_id}/revoke",
+        {"reason": "synthetic in-scope revoke"},
+        expect=200,
+    )
+    assert ok_revoke.json["data"]["ends_at"] is not None
+
+    with admin_seed.app.app_context():
+        mixed = db.session.get(User, UUID(mixed_id))
+        assert mixed is not None
+        outside_row = db.session.get(RoleBinding, UUID(outside_binding_id))
+        assert outside_row is not None and outside_row.ends_at is None
+
+
+def test_fa_cannot_revoke_binding_outside_facility(client, admin_seed):
+    """FA without platform scope gets 404 for facility bindings at other facilities."""
+    with admin_seed.app.app_context():
+        binding = db.session.scalar(
+            select(RoleBinding)
+            .join(Role, Role.id == RoleBinding.role_id)
+            .where(
+                RoleBinding.user_id == admin_seed.user_ids["vht_b"],
+                Role.code == "VHT",
+                RoleBinding.ends_at.is_(None),
+            )
+        )
+        assert binding is not None
+        binding_id = str(binding.id)
+
+    _login(client, "adm.fa.a")
+    response = client.post(
+        f"/api/v1/role-bindings/{binding_id}/revoke",
+        json={"reason": "synthetic cross-facility revoke"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert response.status_code == 404
+
+    with admin_seed.app.app_context():
+        row = db.session.get(RoleBinding, UUID(binding_id))
+        assert row is not None and row.ends_at is None
+
+
+def test_facility_binding_without_active_membership_lacks_delegation(client, admin_seed):
+    """Facility-scoped authority requires an active membership at that facility."""
+    with admin_seed.app.app_context():
+        roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
+        now = datetime.now(UTC)
+        orphan = User(
+            login_identifier="adm.orphan.fa",
+            display_name="Admin Orphan FA",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(orphan)
+        db.session.flush()
+        # Facility binding exists, but membership is already ended.
+        db.session.add(
+            FacilityMembership(
+                user_id=orphan.id,
+                facility_id=admin_seed.facility_ids["ADM-A"],
+                status="ended",
+                starts_at=now - timedelta(days=10),
+                ends_at=now - timedelta(days=1),
+            )
+        )
+        db.session.add(
+            RoleBinding(
+                user_id=orphan.id,
+                role_id=roles["FA"].id,
+                facility_id=admin_seed.facility_ids["ADM-A"],
+                scope_kind="facility",
+                starts_at=now,
+                ends_at=None,
+                granted_by=admin_seed.user_ids["pa"],
+            )
+        )
+        # A revoke target at the same facility.
+        target_binding = RoleBinding(
+            user_id=admin_seed.user_ids["target"],
+            role_id=roles["VHT"].id,
+            facility_id=admin_seed.facility_ids["ADM-A"],
+            scope_kind="facility",
+            starts_at=now,
+            ends_at=None,
+            granted_by=admin_seed.user_ids["fa_a"],
+        )
+        db.session.add(target_binding)
+        db.session.commit()
+        target_id = str(target_binding.id)
+
+    _login(client, "adm.orphan.fa")
+
+    grant = client.post(
+        "/api/v1/role-bindings",
+        json={
+            "user_id": admin_seed.user_ids["already"],
+            "role_code": "VHT",
+            "scope_kind": "facility",
+            "facility_id": admin_seed.facility_ids["ADM-A"],
+            "starts_at": _iso_now(),
+        },
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert grant.status_code == 404
+
+    revoke = client.post(
+        f"/api/v1/role-bindings/{target_id}/revoke",
+        json={"reason": "synthetic orphan revoke"},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert revoke.status_code == 404
+
+    with admin_seed.app.app_context():
+        row = db.session.get(RoleBinding, UUID(target_id))
+        assert row is not None and row.ends_at is None
+
+    # An FA with an active membership at the same facility still has authority.
+    client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": _csrf(client)})
+    _login(client, "adm.fa.a")
+    allowed = _post(
+        client,
+        "/api/v1/role-bindings",
+        {
+            "user_id": admin_seed.user_ids["already"],
+            "role_code": "HCW",
+            "scope_kind": "facility",
+            "facility_id": admin_seed.facility_ids["ADM-A"],
+            "starts_at": _iso_now(),
+        },
+        expect=201,
+    )
+    assert allowed.json["data"]["role_code"] == "HCW"

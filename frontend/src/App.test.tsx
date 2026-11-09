@@ -71,6 +71,12 @@ function stubApi(options: Partial<ApiState> = {}): { calls: RouteCall[]; state: 
         }
         return Response.json(state.login.body ?? {}, { status: state.login.status })
       }
+      if (url.endsWith('/auth/activations')) {
+        return Response.json(
+          { data: { state: 'activated', mfa_required: false } },
+          { status: 200 },
+        )
+      }
       if (url.endsWith('/auth/logout')) {
         state.me = 'unauthorized'
         return new Response(null, { status: 204 })
@@ -130,6 +136,43 @@ describe('TUNZA staff session shell', () => {
     expect(screen.queryByText('Connected care.')).not.toBeInTheDocument()
     expect(screen.queryByRole('navigation', { name: 'Main navigation' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /register|sign up/i })).not.toBeInTheDocument()
+  })
+
+  it('renders the secure activation page when the hash route is #activate', async () => {
+    stubApi({ me: 'unauthorized' })
+    window.location.hash = '#activate'
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { name: 'Activate your staff account' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Activation token')).toBeInTheDocument()
+    expect(screen.getByLabelText('New password')).toBeInTheDocument()
+    expect(screen.getByLabelText('Confirm password')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Staff sign in' })).not.toBeInTheDocument()
+
+    window.location.hash = ''
+  })
+
+  it('returns to sign-in after activation and shows the success notice', async () => {
+    const { state } = stubApi({ me: 'unauthorized' })
+    window.location.hash = '#activate'
+    render(<App />)
+    expect(
+      await screen.findByRole('heading', { name: 'Activate your staff account' }),
+    ).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Activation token'), 'one-time-token')
+    await user.type(screen.getByLabelText('New password'), 'synthetic-password')
+    await user.type(screen.getByLabelText('Confirm password'), 'synthetic-password')
+    await user.click(screen.getByRole('button', { name: 'Activate account' }))
+
+    expect(await screen.findByRole('heading', { name: 'Staff sign in' })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Account activated. Sign in with your new password.')
+    expect(state.me).toBe('unauthorized')
+
+    window.location.hash = ''
   })
 
   it('shows a session notice when the identity request cannot reach the server', async () => {

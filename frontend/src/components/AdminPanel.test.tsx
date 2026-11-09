@@ -69,6 +69,22 @@ function stubFetch(routes: Record<string, unknown>) {
           ],
         })
       }
+      if (url.endsWith('/memberships') && method === 'POST') {
+        return Response.json(
+          {
+            data: {
+              id: 'mem-new',
+              user_id: 'acct-1',
+              facility_id: 'facility-a',
+              status: 'active',
+              starts_at: '2026-01-01T00:00:00+00:00',
+              ends_at: null,
+              version: 1,
+            },
+          },
+          { status: 201 },
+        )
+      }
       if (url.endsWith('/role-bindings') && method === 'GET') {
         return Response.json({
           data: [
@@ -138,6 +154,20 @@ describe('AdminPanel', () => {
 
     expect(await screen.findByTestId('activation-token')).toHaveTextContent('one-time-token')
     expect(screen.getByRole('status')).toHaveTextContent('Account provisioned')
+  })
+
+  it('assigns a facility membership through the membership form', async () => {
+    stubFetch({})
+    render(<AdminPanel identity={adminIdentity} />)
+    expect(await screen.findByRole('button', { name: 'Assign membership' })).toBeDisabled()
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Staff account'), 'acct-1')
+    await user.selectOptions(screen.getByLabelText('Assign to facility'), 'facility-a')
+    await user.click(screen.getByRole('button', { name: 'Assign membership' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Facility membership assigned.')
+    expect(screen.getByRole('button', { name: 'Assign membership' })).toBeDisabled()
   })
 
   it('does not render administration sections for a VHT identity', async () => {
