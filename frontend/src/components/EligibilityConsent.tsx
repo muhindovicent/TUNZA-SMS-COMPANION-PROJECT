@@ -52,19 +52,18 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
     setMessage('')
     setBusy(true)
     try {
-      const result = await apiFetch<{ data: { patient: { id: string; facility_id: string; local_reference: string } }[] }>('/patients/search', {
+      const profiles = await apiFetch<{ id: string; facility_id: string; local_reference: string }[]>('/patients/search', {
         method: 'POST', body: { facility_id: facility, local_reference: reference },
       })
-      if (!result) {
+      if (!profiles) {
         setMessage('Search could not be completed.')
         setBusy(false)
         return
       }
-      const patients = result.data
-      if (patients.length === 0) {
+      if (profiles.length === 0) {
         setMessage('No assigned synthetic record found.')
       } else {
-        const found = patients[0].patient
+        const found = profiles[0]
         setPatient(found)
         await loadEligibility(found.id)
         await loadConsentEvents(found.id)

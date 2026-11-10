@@ -565,6 +565,9 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
     membership = _active_membership(context, facility_id)
     if membership is None:
         return _deny_patient_access(context, "eligibility.record", "facility_scope")
+    idempotency_key = _validate_idempotency_key()
+    if idempotency_key is None:
+        return _error("validation_failed", "A valid Idempotency-Key is required.", 422)
     establish_patient_context(context, facility_id)
     profile = db.session.scalar(
         _assigned_profiles(context, facility_id).where(
@@ -573,15 +576,33 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "eligibility.record", "unavailable")
-    now = datetime.now(UTC)
-    max_sequence = db.session.scalar(
-        select(sa.func.max(AdultEligibilityCheck.sequence)).where(
-            AdultEligibilityCheck.patient_id == patient_id,
+    # Idempotency: replay existing check if key already recorded for this facility
+    existing = db.session.scalar(
+        select(AdultEligibilityCheck).where(
             AdultEligibilityCheck.facility_id == facility_id,
+            AdultEligibilityCheck.idempotency_key == idempotency_key,
         )
     )
-    next_sequence = (max_sequence or 0) + 1
+    if existing is not None:
+        return jsonify(data=_eligibility_projection(existing)), 201
     try:
+        # Lock existing rows for this patient+facility to assign sequence atomically
+        db.session.execute(
+            select(AdultEligibilityCheck)
+            .where(
+                AdultEligibilityCheck.patient_id == patient_id,
+                AdultEligibilityCheck.facility_id == facility_id,
+            )
+            .with_for_update()
+        )
+        max_sequence = db.session.scalar(
+            select(sa.func.max(AdultEligibilityCheck.sequence)).where(
+                AdultEligibilityCheck.patient_id == patient_id,
+                AdultEligibilityCheck.facility_id == facility_id,
+            )
+        )
+        next_sequence = (max_sequence or 0) + 1
+        now = datetime.now(UTC)
         check = AdultEligibilityCheck(
             id=uuid4(),
             patient_id=patient_id,
@@ -591,6 +612,7 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
             checked_at=now,
             checked_by=context.user.id,
             evidence_id=evidence_id,
+            idempotency_key=idempotency_key,
             sequence=next_sequence,
         )
         db.session.add(check)
@@ -759,6 +781,7 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
     language = payload.get("language")
     evidence_id = _parse_uuid(payload.get("evidence_id"))
     supersedes_id = _parse_uuid(payload.get("supersedes_id"))
+    idempotency_key = _validate_idempotency_key()
     if (
         facility_id is None
         or not isinstance(purpose, str)
@@ -767,6 +790,7 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
         or not isinstance(method, str)
         or not isinstance(language, str)
         or language not in {"en", "lg"}
+        or idempotency_key is None
     ):
         return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
     if not facility_scope_allows(context, facility_id, "consent.record"):
@@ -774,20 +798,21 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
     membership = _active_membership(context, facility_id)
     if membership is None:
         return _deny_patient_access(context, "consent.record", "facility_scope")
-    # For withdraw decisions, require the withdraw permission AND facility-scoped membership
+    # For withdraw decisions, require the withdraw permission AND facility-scoped withdraw
     if decision == "withdraw":
         if "consent.withdraw" not in context.permissions:
             return _deny_patient_access(context, "consent.withdraw", "permission")
-    establish_patient_context(context, facility_id)
-    profile = db.session.scalar(
-        _assigned_profiles(context, facility_id).where(
-            FacilityPatientProfile.patient_id == patient_id
-        )
-    )
-    if profile is None:
-        return _deny_patient_access(context, "consent.record", "unavailable")
-    # Validate notice version for grant decisions
+        if not facility_scope_allows(context, facility_id, "consent.withdraw"):
+            return _deny_patient_access(context, "consent.withdraw", "facility_scope")
+    # For grant decisions, require a valid approved notice covering the purpose
+    # and a valid evidence reference belonging to this facility
     if decision == "grant":
+        if notice_version_id is None:
+            return _error(
+                "validation_failed",
+                "A valid approved consent notice is required for grant.",
+                422,
+            )
         notice = db.session.scalar(
             select(ConsentNoticeVersion).where(
                 ConsentNoticeVersion.id == notice_version_id,
@@ -806,8 +831,26 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
                 "The notice does not cover the requested purpose.",
                 422,
             )
-    # Validate evidence exists and belongs to the same facility
-    if evidence_id is not None:
+        if evidence_id is None:
+            return _error(
+                "validation_failed",
+                "A valid evidence reference belonging to this facility is required for grant.",
+                422,
+            )
+        evidence = db.session.scalar(
+            select(ProtectedEvidence).where(
+                ProtectedEvidence.id == evidence_id,
+                ProtectedEvidence.facility_id == facility_id,
+            )
+        )
+        if evidence is None:
+            return _error(
+                "validation_failed",
+                "A valid evidence reference belonging to this facility is required for grant.",
+                422,
+            )
+    # Validate evidence exists and belongs to the same facility (when provided)
+    if evidence_id is not None and decision != "grant":
         evidence = db.session.scalar(
             select(ProtectedEvidence).where(
                 ProtectedEvidence.id == evidence_id,
@@ -820,15 +863,41 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
                 "A valid evidence reference belonging to this facility is required.",
                 422,
             )
-    max_sequence = db.session.scalar(
-        select(sa.func.max(ConsentEvent.event_sequence)).where(
-            ConsentEvent.patient_id == patient_id,
-            ConsentEvent.facility_id == facility_id,
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
         )
     )
-    next_sequence = (max_sequence or 0) + 1
+    if profile is None:
+        return _deny_patient_access(context, "consent.record", "unavailable")
+    # Idempotency: replay existing event if key already recorded for this facility
+    existing = db.session.scalar(
+        select(ConsentEvent).where(
+            ConsentEvent.facility_id == facility_id,
+            ConsentEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        return jsonify(data=_consent_event_projection(existing)), 201
     now = datetime.now(UTC)
     try:
+        # Lock existing rows for this patient+facility to assign sequence atomically
+        db.session.execute(
+            select(ConsentEvent)
+            .where(
+                ConsentEvent.patient_id == patient_id,
+                ConsentEvent.facility_id == facility_id,
+            )
+            .with_for_update()
+        )
+        max_sequence = db.session.scalar(
+            select(sa.func.max(ConsentEvent.event_sequence)).where(
+                ConsentEvent.patient_id == patient_id,
+                ConsentEvent.facility_id == facility_id,
+            )
+        )
+        next_sequence = (max_sequence or 0) + 1
         event = ConsentEvent(
             id=uuid4(),
             patient_id=patient_id,
@@ -842,6 +911,7 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             effective_at=now,
             recorded_by=context.user.id,
             evidence_id=evidence_id,
+            idempotency_key=idempotency_key,
             supersedes_id=supersedes_id,
             event_sequence=next_sequence,
         )

@@ -142,6 +142,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("evidence_id", sa.Uuid(), nullable=True),
+        sa.Column("idempotency_key", sa.String(128), nullable=True),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column(
             "created_at",
@@ -179,8 +180,14 @@ def upgrade() -> None:
             "sequence",
             name="uq_adult_eligibility_patient_facility_sequence",
         ),
+        sa.UniqueConstraint(
+            "facility_id",
+            "idempotency_key",
+            name="uq_adult_eligibility_facility_idempotency_key",
+        ),
         sa.Index("ix_adult_eligibility_checks_facility_id", "facility_id"),
         sa.Index("ix_adult_eligibility_checks_patient_id", "patient_id"),
+        sa.Index("ix_adult_eligibility_checks_idempotency_key", "idempotency_key"),
     )
     _enable_rls(
         "adult_eligibility_checks",
@@ -214,6 +221,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("evidence_id", sa.Uuid(), nullable=True),
+        sa.Column("idempotency_key", sa.String(128), nullable=True),
         sa.Column("supersedes_id", sa.Uuid(), nullable=True),
         sa.Column("event_sequence", sa.Integer(), nullable=False),
         sa.Column(
@@ -268,8 +276,20 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("event_sequence > 0", name="ck_consent_event_sequence_positive"),
         sa.CheckConstraint("version > 0", name="ck_consent_event_version_positive"),
+        sa.UniqueConstraint(
+            "patient_id",
+            "facility_id",
+            "event_sequence",
+            name="uq_consent_event_patient_facility_sequence",
+        ),
+        sa.UniqueConstraint(
+            "facility_id",
+            "idempotency_key",
+            name="uq_consent_event_facility_idempotency_key",
+        ),
         sa.Index("ix_consent_events_facility_id", "facility_id"),
         sa.Index("ix_consent_events_patient_id", "patient_id"),
+        sa.Index("ix_consent_events_idempotency_key", "idempotency_key"),
     )
     _enable_rls(
         "consent_events",
@@ -314,8 +334,31 @@ def upgrade() -> None:
         "FOR EACH ROW EXECUTE FUNCTION consent_events_append_only()"
     )
 
+    # Append-only trigger for consent_notice_versions (publication restricted to INSERT only)
+    op.execute(
+        """
+        CREATE FUNCTION consent_notice_versions_append_only()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'consent_notice_versions rows are append-only';
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER consent_notice_versions_append_only "
+        "BEFORE UPDATE OR DELETE ON consent_notice_versions "
+        "FOR EACH ROW EXECUTE FUNCTION consent_notice_versions_append_only()"
+    )
+
 
 def downgrade() -> None:
+    op.execute(
+        "DROP TRIGGER IF EXISTS consent_notice_versions_append_only ON consent_notice_versions"
+    )
+    op.execute("DROP FUNCTION IF EXISTS consent_notice_versions_append_only()")
     op.execute("DROP TRIGGER IF EXISTS consent_events_append_only ON consent_events")
     op.execute("DROP FUNCTION IF EXISTS consent_events_append_only()")
     op.execute(

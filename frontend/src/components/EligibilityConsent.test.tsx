@@ -17,10 +17,7 @@ describe('synthetic eligibility and consent', () => {
 
   it('finds patient via search API with correct response structure', async () => {
     vi.mocked(apiFetch)
-      .mockResolvedValueOnce({
-        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
-        page: { next_cursor: null },
-      })
+      .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
     render(<EligibilityConsent identity={identity} />)
@@ -34,10 +31,7 @@ describe('synthetic eligibility and consent', () => {
 
   it('records eligibility assessment', async () => {
     vi.mocked(apiFetch)
-      .mockResolvedValueOnce({
-        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
-        page: { next_cursor: null },
-      })
+      .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce({} as Record<string, unknown>)
@@ -59,10 +53,7 @@ describe('synthetic eligibility and consent', () => {
 
   it('records consent grant', async () => {
     vi.mocked(apiFetch)
-      .mockResolvedValueOnce({
-        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
-        page: { next_cursor: null },
-      })
+      .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce({} as Record<string, unknown>)
@@ -94,10 +85,7 @@ describe('synthetic eligibility and consent', () => {
 
   it('shows registration and consent with registration permission', async () => {
     vi.mocked(apiFetch)
-      .mockResolvedValueOnce({
-        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
-        page: { next_cursor: null },
-      })
+      .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
     render(<EligibilityConsent identity={identity} />)

@@ -924,9 +924,11 @@ def test_consent_grant_withdraw_and_history(client, identity):
         # Establish actor context for test data setup (D03 unresolved - test fixture only)
         from tunza.access import load_access_context
         from tunza.identity.models import User
+
         user = db.session.get(User, identity.user_ids["vht_a"])
         context = load_access_context(user)
         from tunza.patients.security import establish_patient_context
+
         establish_patient_context(context, facility_id)
         # Create a synthetic consent notice version (D03 unresolved - test fixture only)
         notice_id = db.session.scalar(
@@ -1054,6 +1056,7 @@ def test_consent_audit_failure_rolls_back(client, identity, monkeypatch):
     )
     assert response.status_code == 201, response.json
 
+
 def test_cross_patient_evidence_denied(client, identity):
     """Cross-patient evidence access should be denied."""
     _login(client, "tst.vht.a")
@@ -1066,6 +1069,7 @@ def test_cross_patient_evidence_denied(client, identity):
         from tunza.access import load_access_context
         from tunza.identity.models import User
         from tunza.patients.security import establish_patient_context
+
         user = db.session.get(User, identity.user_ids["vht_a"])
         context = load_access_context(user)
         establish_patient_context(context, facility_id)
@@ -1143,6 +1147,7 @@ def test_consent_events_append_only(client, identity):
         from tunza.access import load_access_context
         from tunza.identity.models import User
         from tunza.patients.security import establish_patient_context
+
         user = db.session.get(User, identity.user_ids["vht_a"])
         context = load_access_context(user)
         establish_patient_context(context, facility_id)
@@ -1155,7 +1160,7 @@ def test_consent_events_append_only(client, identity):
                 "method, language, effective_at, recorded_by, "
                 "event_sequence) "
                 "VALUES (:id, :patient_id, :facility_id, :purpose, :decision, "
-                "method, language, effective_at, recorded_by, 1) "
+                ":method, :language, :effective_at, :recorded_by, 1) "
                 "RETURNING id"
             ),
             {
@@ -1173,28 +1178,22 @@ def test_consent_events_append_only(client, identity):
         db.session.commit()
 
         # Try to UPDATE the consent event - should fail due to append-only trigger
-        try:
+        with pytest.raises(DBAPIError, match="append-only"):
             db.session.execute(
-                sa.text(
-                    "UPDATE consent_events SET decision = 'withdraw' WHERE id = :id"
-                ),
+                sa.text("UPDATE consent_events SET decision = 'withdraw' WHERE id = :id"),
                 {"id": event_id},
             )
             db.session.commit()
-            raise AssertionError("UPDATE should have failed due to append-only trigger")
-        except Exception:
-            db.session.rollback()
+        db.session.rollback()
 
         # Try to DELETE the consent event - should fail due to append-only trigger
-        try:
+        with pytest.raises(DBAPIError, match="append-only"):
             db.session.execute(
                 sa.text("DELETE FROM consent_events WHERE id = :id"),
                 {"id": event_id},
             )
             db.session.commit()
-            raise AssertionError("DELETE should have failed due to append-only trigger")
-        except Exception:
-            db.session.rollback()
+        db.session.rollback()
 
         # Verify the event still exists - re-establish context after rollback
         establish_patient_context(context, facility_id)
@@ -1203,3 +1202,317 @@ def test_consent_events_append_only(client, identity):
             {"id": event_id},
         )
         assert count == 1
+
+
+def test_concurrent_eligibility_sequence_safety(identity):
+    """Concurrent eligibility checks for the same patient+facility get distinct sequences."""
+    _login_client = identity.app.test_client()
+    _login(_login_client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(_login_client, facility_id, "concurrent-elig")
+
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.a")
+
+    csrf_a = _csrf(_login_client)
+    csrf_b = _csrf(client_b)
+
+    barrier = Barrier(2)
+    results = {}
+
+    def submit(client, csrf, label):
+        barrier.wait(timeout=10)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+            json={
+                "method": "documentary",
+                "result": "verified",
+                "checked_at": "2026-01-15T10:00:00Z",
+            },
+            headers={"X-CSRF-Token": csrf, "Idempotency-Key": str(uuid4())},
+        )
+        results[label] = (response.status_code, response.json)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(submit, _login_client, csrf_a, "a")
+        executor.submit(submit, client_b, csrf_b, "b")
+
+    statuses = {results[k][0] for k in results}
+    assert statuses == {201}, results
+    sequences = {results[k][1]["data"]["sequence"] for k in results}
+    assert len(sequences) == 2, f"Expected distinct sequences, got {sequences}"
+
+
+def test_concurrent_consent_sequence_safety(identity):
+    """Concurrent consent events for the same patient+facility get distinct sequences."""
+    _login_client = identity.app.test_client()
+    _login(_login_client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(_login_client, facility_id, "concurrent-consent")
+
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.a")
+
+    csrf_a = _csrf(_login_client)
+    csrf_b = _csrf(client_b)
+
+    barrier = Barrier(2)
+    results = {}
+
+    def submit(client, csrf, label):
+        barrier.wait(timeout=10)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+            json={
+                "purpose": "messaging",
+                "decision": "grant",
+                "method": "documentary",
+                "language": "en",
+                "notice_version_id": str(uuid4()),
+                "evidence_id": str(uuid4()),
+            },
+            headers={"X-CSRF-Token": csrf, "Idempotency-Key": str(uuid4())},
+        )
+        results[label] = (response.status_code, response.json)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(submit, _login_client, csrf_a, "a")
+        executor.submit(submit, client_b, csrf_b, "b")
+
+    statuses = {results[k][0] for k in results}
+    assert statuses == {201}, results
+    sequences = {results[k][1]["data"]["event_sequence"] for k in results}
+    assert len(sequences) == 2, f"Expected distinct sequences, got {sequences}"
+
+
+def test_consent_withdraw_requires_facility_scope(client, identity):
+    """Withdraw consent must be blocked when the staff lacks facility-scoped consent.withdraw."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "withdraw-scope")
+
+    # Register a grant first
+    with identity.app.app_context():
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        from tunza.patients.security import establish_patient_context
+
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        context = load_access_context(user)
+        establish_patient_context(context, facility_id)
+        notice_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO consent_notice_versions "
+                "(id, notice_code, revision, language, "
+                "text_cipher, purpose_codes, status, version) "
+                "VALUES (:id, 'SYN-CONSENT-WITHDRAW', 1, 'en', :cipher, "
+                "ARRAY['messaging'], 'approved', 1) RETURNING id"
+            ),
+            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
+        )
+        evidence_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO protected_evidence "
+                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
+                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
+                "RETURNING id"
+            ),
+            {
+                "id": uuid4(),
+                "facility_id": facility_id,
+                "ref": "withdraw-evidence-ref",
+                "digest": b"withdraw-digest",
+                "media_type": "application/pdf",
+                "recorded_by": identity.user_ids["vht_a"],
+            },
+        )
+        db.session.commit()
+
+    grant_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert grant_response.status_code == 201, grant_response.json
+
+    # vht.a has consent.record but NOT consent.withdraw permission -> withdraw denied
+    withdraw_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "withdraw",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert withdraw_response.status_code == 404, withdraw_response.json
+
+
+def test_consent_grant_requires_evidence(client, identity):
+    """Consent grant without a valid evidence reference must fail closed."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "grant-evidence")
+
+    with identity.app.app_context():
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        from tunza.patients.security import establish_patient_context
+
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        context = load_access_context(user)
+        establish_patient_context(context, facility_id)
+        notice_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO consent_notice_versions "
+                "(id, notice_code, revision, language, "
+                "text_cipher, purpose_codes, status, version) "
+                "VALUES (:id, 'SYN-CONSENT-EVIDENCE', 1, 'en', :cipher, "
+                "ARRAY['messaging'], 'approved', 1) RETURNING id"
+            ),
+            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
+        )
+        db.session.commit()
+
+    # Grant without evidence_id should fail (422)
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 422, response.json
+
+    # Grant with non-existent evidence_id should fail (422)
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(uuid4()),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 422, response.json
+
+
+def test_eligibility_idempotency_replay(client, identity):
+    """Same idempotency key replays the existing eligibility check."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "elig-idem")
+
+    key = str(uuid4())
+    response1 = client.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+        json={
+            "method": "documentary",
+            "result": "verified",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response1.status_code == 201, response1.json
+    seq1 = response1.json["data"]["sequence"]
+
+    response2 = client.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+        json={
+            "method": "documentary",
+            "result": "ineligible",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response2.status_code == 201, response2.json
+    assert response2.json["data"]["sequence"] == seq1
+    assert response2.json["data"]["result"] == "verified"
+
+
+def test_consent_idempotency_replay(client, identity):
+    """Same idempotency key replays the existing consent event."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "consent-idem")
+
+    with identity.app.app_context():
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        from tunza.patients.security import establish_patient_context
+
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        context = load_access_context(user)
+        establish_patient_context(context, facility_id)
+        notice_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO consent_notice_versions "
+                "(id, notice_code, revision, language, "
+                "text_cipher, purpose_codes, status, version) "
+                "VALUES (:id, 'SYN-CONSENT-IDEM', 1, 'en', :cipher, "
+                "ARRAY['messaging'], 'approved', 1) RETURNING id"
+            ),
+            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
+        )
+        evidence_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO protected_evidence "
+                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
+                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
+                "RETURNING id"
+            ),
+            {
+                "id": uuid4(),
+                "facility_id": facility_id,
+                "ref": "consent-idem-evidence",
+                "digest": b"consent-idem-digest",
+                "media_type": "application/pdf",
+                "recorded_by": identity.user_ids["vht_a"],
+            },
+        )
+        db.session.commit()
+
+    key = str(uuid4())
+    response1 = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response1.status_code == 201, response1.json
+    seq1 = response1.json["data"]["event_sequence"]
+
+    response2 = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "withdraw",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response2.status_code == 201, response2.json
+    assert response2.json["data"]["event_sequence"] == seq1
+    assert response2.json["data"]["decision"] == "grant"

@@ -296,6 +296,11 @@ class AdultEligibilityCheck(db.Model):
             "sequence",
             name="uq_adult_eligibility_patient_facility_sequence",
         ),
+        UniqueConstraint(
+            "facility_id",
+            "idempotency_key",
+            name="uq_adult_eligibility_facility_idempotency_key",
+        ),
         CheckConstraint(
             "result IN ('verified', 'uncertain', 'ineligible')",
             name="ck_adult_eligibility_result_values",
@@ -317,6 +322,7 @@ class AdultEligibilityCheck(db.Model):
         nullable=False,
     )
     evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -402,6 +408,17 @@ class ConsentEvent(db.Model):
         ),
         CheckConstraint("event_sequence > 0", name="ck_consent_event_sequence_positive"),
         CheckConstraint("version > 0", name="ck_consent_event_version_positive"),
+        UniqueConstraint(
+            "patient_id",
+            "facility_id",
+            "event_sequence",
+            name="uq_consent_event_patient_facility_sequence",
+        ),
+        UniqueConstraint(
+            "facility_id",
+            "idempotency_key",
+            name="uq_consent_event_facility_idempotency_key",
+        ),
         {"implicit_returning": False},
     )
 
@@ -421,6 +438,7 @@ class ConsentEvent(db.Model):
         nullable=False,
     )
     evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
