@@ -15,11 +15,32 @@ const identity: StaffIdentity = {
 describe('synthetic eligibility and consent', () => {
   beforeEach(() => vi.resetAllMocks())
 
-  it('registers eligibility and records consent', async () => {
+  it('finds patient via search API with correct response structure', async () => {
     vi.mocked(apiFetch)
-      .mockResolvedValueOnce([{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }])
+      .mockResolvedValueOnce({
+        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
+        page: { next_cursor: null },
+      })
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+    render(<EligibilityConsent identity={identity} />)
+    fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))
+    await screen.findByText(/Patient:/)
+    const searchCall = vi.mocked(apiFetch).mock.calls.find((call) => call[0] === '/patients/search')
+    expect(searchCall).toBeDefined()
+    expect(searchCall![1]?.body).toEqual({ facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' })
+  })
+
+  it('records eligibility assessment', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
+        page: { next_cursor: null },
+      })
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({} as Record<string, unknown>)
     render(<EligibilityConsent identity={identity} />)
     fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
     fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))
@@ -27,6 +48,63 @@ describe('synthetic eligibility and consent', () => {
     fireEvent.change(screen.getByLabelText('Result'), { target: { value: 'verified' } })
     fireEvent.click(screen.getByRole('button', { name: 'Record eligibility check' }))
     await screen.findByText('Eligibility check recorded.')
-    expect(vi.mocked(apiFetch).mock.calls.some((call) => call[0]?.includes('/patients/patient/eligibility'))).toBe(true)
+    const eligibilityCall = vi.mocked(apiFetch).mock.calls.find((call) =>
+      typeof call[0] === 'string' &&
+      call[0].includes('/patients/patient/eligibility?facility_id=') &&
+      call[1]?.method === 'POST'
+    )
+    expect(eligibilityCall).toBeDefined()
+    expect(eligibilityCall![1]?.body).toEqual({ method: 'documentary', result: 'verified', checked_at: expect.any(String) })
+  })
+
+  it('records consent grant', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
+        page: { next_cursor: null },
+      })
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({} as Record<string, unknown>)
+    render(<EligibilityConsent identity={identity} />)
+    fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))
+    await screen.findByText(/Patient:/)
+    fireEvent.click(screen.getByRole('button', { name: 'Record consent grant' }))
+    await screen.findByText('Consent grant recorded.')
+    const consentCall = vi.mocked(apiFetch).mock.calls.find((call) =>
+      typeof call[0] === 'string' &&
+      call[0].includes('/patients/patient/consent-events?facility_id=') &&
+      call[1]?.method === 'POST'
+    )
+    expect(consentCall).toBeDefined()
+    expect(consentCall![1]?.body).toEqual({
+      purpose: 'messaging',
+      decision: 'grant',
+      method: 'documentary',
+      language: 'en',
+    })
+  })
+
+  it('hides registration and consent without registration permission', () => {
+    render(<EligibilityConsent identity={{ ...identity, permissions: ['patient.read', 'consent.read'] }} />)
+    expect(screen.queryByRole('button', { name: 'Record eligibility check' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Record consent/ })).toBeNull()
+  })
+
+  it('shows registration and consent with registration permission', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        data: [{ patient: { id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' } }],
+        page: { next_cursor: null },
+      })
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+    render(<EligibilityConsent identity={identity} />)
+    fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))
+    await screen.findByText(/Patient:/)
+    expect(screen.getByRole('button', { name: 'Record eligibility check' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Record consent/ })).toBeInTheDocument()
   })
 })

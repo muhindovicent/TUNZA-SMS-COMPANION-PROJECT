@@ -59,6 +59,12 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.Column(
+            "version",
+            sa.Integer(),
+            nullable=False,
+            server_default="1",
+        ),
         sa.UniqueConstraint("id", "facility_id", name="uq_protected_evidence_id_facility"),
         sa.Index("ix_protected_evidence_facility_id", "facility_id"),
     )
@@ -113,6 +119,7 @@ def upgrade() -> None:
         "tunza_current_uuid('tunza.actor_id') IS NOT NULL",
     )
     op.execute(f"GRANT SELECT ON consent_notice_versions TO {RUNTIME_ROLE}")
+    op.execute(f"GRANT INSERT ON consent_notice_versions TO {RUNTIME_ROLE}")
 
     op.create_table(
         "adult_eligibility_checks",
@@ -271,8 +278,50 @@ def upgrade() -> None:
     )
     _grant_runtime("consent_events")
 
+    # Append-only triggers for adult_eligibility_checks and consent_events
+    op.execute(
+        """
+        CREATE FUNCTION adult_eligibility_checks_append_only()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'adult_eligibility_checks rows are append-only';
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER adult_eligibility_checks_append_only "
+        "BEFORE UPDATE OR DELETE ON adult_eligibility_checks "
+        "FOR EACH ROW EXECUTE FUNCTION adult_eligibility_checks_append_only()"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION consent_events_append_only()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'consent_events rows are append-only';
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER consent_events_append_only "
+        "BEFORE UPDATE OR DELETE ON consent_events "
+        "FOR EACH ROW EXECUTE FUNCTION consent_events_append_only()"
+    )
+
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS consent_events_append_only ON consent_events")
+    op.execute("DROP FUNCTION IF EXISTS consent_events_append_only()")
+    op.execute(
+        "DROP TRIGGER IF EXISTS adult_eligibility_checks_append_only ON adult_eligibility_checks"
+    )
+    op.execute("DROP FUNCTION IF EXISTS adult_eligibility_checks_append_only()")
     op.execute("DROP POLICY IF EXISTS consent_events_runtime_scope ON consent_events")
     op.execute(
         "DROP POLICY IF EXISTS adult_eligibility_checks_runtime_scope ON adult_eligibility_checks"

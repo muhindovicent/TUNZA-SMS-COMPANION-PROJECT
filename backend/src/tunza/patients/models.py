@@ -272,6 +272,7 @@ class ProtectedEvidence(db.Model):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
 
 class AdultEligibilityCheck(db.Model):

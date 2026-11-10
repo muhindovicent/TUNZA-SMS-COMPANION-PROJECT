@@ -52,13 +52,19 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
     setMessage('')
     setBusy(true)
     try {
-      const result = await apiFetch<{ patient: { id: string; facility_id: string; local_reference: string } }[]>('/patients/search', {
+      const result = await apiFetch<{ data: { patient: { id: string; facility_id: string; local_reference: string } }[] }>('/patients/search', {
         method: 'POST', body: { facility_id: facility, local_reference: reference },
       })
-      if (result.length === 0) {
+      if (!result) {
+        setMessage('Search could not be completed.')
+        setBusy(false)
+        return
+      }
+      const patients = result.data
+      if (patients.length === 0) {
         setMessage('No assigned synthetic record found.')
       } else {
-        const found = result[0].patient
+        const found = patients[0].patient
         setPatient(found)
         await loadEligibility(found.id)
         await loadConsentEvents(found.id)
@@ -75,7 +81,7 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
       const checks = await apiFetch<EligibilityCheck[]>(`/patients/${encodeURIComponent(patientId)}/eligibility?facility_id=${encodeURIComponent(facility)}`, {
         method: 'GET',
       })
-      if (checks.length > 0) setEligibility(checks[0])
+      if (checks && checks.length > 0) setEligibility(checks[0])
     } catch {
       setEligibility(null)
     }
@@ -86,7 +92,7 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
       const events = await apiFetch<ConsentEvent[]>(`/patients/${encodeURIComponent(patientId)}/consent-events?facility_id=${encodeURIComponent(facility)}`, {
         method: 'GET',
       })
-      setConsentEvents(events)
+      setConsentEvents(events || [])
     } catch {
       setConsentEvents([])
     }

@@ -491,6 +491,51 @@ def _eligibility_projection(check: AdultEligibilityCheck) -> dict[str, object]:
     }
 
 
+@blueprint.get("/<uuid:patient_id>/eligibility")
+@require_permission("eligibility.record")
+def list_eligibility_checks(patient_id: UUID) -> tuple[Response, int]:
+    context = get_access_context()
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    if facility_id is None:
+        return _error("validation_failed", "A valid facility context is required.", 422)
+    if not facility_scope_allows(context, facility_id, "eligibility.record"):
+        return _deny_patient_access(context, "eligibility.record", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "eligibility.record", "facility_scope")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "eligibility.record", "unavailable")
+    checks = list(
+        db.session.scalars(
+            select(AdultEligibilityCheck)
+            .where(
+                AdultEligibilityCheck.patient_id == patient_id,
+                AdultEligibilityCheck.facility_id == facility_id,
+            )
+            .order_by(AdultEligibilityCheck.checked_at.desc())
+        ).all()
+    )
+    try:
+        _record_patient_audit(
+            context=context,
+            permission="eligibility.record",
+            action="eligibility.history",
+            facility_id=facility_id,
+            patient_id=patient_id,
+        )
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(data=[_eligibility_projection(c) for c in checks]), 200
+
+
 @blueprint.post("/<uuid:patient_id>/eligibility")
 @require_permission("eligibility.record")
 def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
@@ -529,6 +574,13 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
     if profile is None:
         return _deny_patient_access(context, "eligibility.record", "unavailable")
     now = datetime.now(UTC)
+    max_sequence = db.session.scalar(
+        select(sa.func.max(AdultEligibilityCheck.sequence)).where(
+            AdultEligibilityCheck.patient_id == patient_id,
+            AdultEligibilityCheck.facility_id == facility_id,
+        )
+    )
+    next_sequence = (max_sequence or 0) + 1
     try:
         check = AdultEligibilityCheck(
             id=uuid4(),
@@ -539,7 +591,7 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
             checked_at=now,
             checked_by=context.user.id,
             evidence_id=evidence_id,
-            sequence=1,
+            sequence=next_sequence,
         )
         db.session.add(check)
         _record_patient_audit(
@@ -722,10 +774,10 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
     membership = _active_membership(context, facility_id)
     if membership is None:
         return _deny_patient_access(context, "consent.record", "facility_scope")
-    if decision == "withdraw" and not (
-        context.permissions and "consent.withdraw" in context.permissions
-    ):
-        return _deny_patient_access(context, "consent.withdraw", "permission")
+    # For withdraw decisions, require the withdraw permission AND facility-scoped membership
+    if decision == "withdraw":
+        if "consent.withdraw" not in context.permissions:
+            return _deny_patient_access(context, "consent.withdraw", "permission")
     establish_patient_context(context, facility_id)
     profile = db.session.scalar(
         _assigned_profiles(context, facility_id).where(
@@ -734,6 +786,40 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "consent.record", "unavailable")
+    # Validate notice version for grant decisions
+    if decision == "grant":
+        notice = db.session.scalar(
+            select(ConsentNoticeVersion).where(
+                ConsentNoticeVersion.id == notice_version_id,
+                ConsentNoticeVersion.status == "approved",
+            )
+        )
+        if notice is None:
+            return _error(
+                "validation_failed",
+                "A valid approved consent notice is required for grant.",
+                422,
+            )
+        if purpose not in notice.purpose_codes:
+            return _error(
+                "validation_failed",
+                "The notice does not cover the requested purpose.",
+                422,
+            )
+    # Validate evidence exists and belongs to the same facility
+    if evidence_id is not None:
+        evidence = db.session.scalar(
+            select(ProtectedEvidence).where(
+                ProtectedEvidence.id == evidence_id,
+                ProtectedEvidence.facility_id == facility_id,
+            )
+        )
+        if evidence is None:
+            return _error(
+                "validation_failed",
+                "A valid evidence reference belonging to this facility is required.",
+                422,
+            )
     max_sequence = db.session.scalar(
         select(sa.func.max(ConsentEvent.event_sequence)).where(
             ConsentEvent.patient_id == patient_id,
@@ -800,10 +886,19 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "consent.read", "unavailable")
+    # Evidence must belong to the same facility AND be referenced by a consent event
+    # for this patient/facility to ensure patient+purpose correspondence
     evidence = db.session.scalar(
         select(ProtectedEvidence).where(
             ProtectedEvidence.id == evidence_id,
             ProtectedEvidence.facility_id == facility_id,
+            ProtectedEvidence.id.in_(
+                select(ConsentEvent.evidence_id).where(
+                    ConsentEvent.patient_id == patient_id,
+                    ConsentEvent.facility_id == facility_id,
+                    ConsentEvent.evidence_id.is_not(None),
+                )
+            ),
         )
     )
     if evidence is None:
@@ -824,8 +919,6 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
     return jsonify(
         {
             "id": str(evidence.id),
-            "facility_id": str(evidence.facility_id),
-            "storage_reference": evidence.storage_reference,
             "media_type": evidence.media_type,
             "recorded_by": str(evidence.recorded_by),
             "version": evidence.version,

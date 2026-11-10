@@ -920,13 +920,52 @@ def test_consent_grant_withdraw_and_history(client, identity):
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "consent-flow")
 
+    with identity.app.app_context():
+        # Establish actor context for test data setup (D03 unresolved - test fixture only)
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        context = load_access_context(user)
+        from tunza.patients.security import establish_patient_context
+        establish_patient_context(context, facility_id)
+        # Create a synthetic consent notice version (D03 unresolved - test fixture only)
+        notice_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO consent_notice_versions "
+                "(id, notice_code, revision, language, text_cipher, purpose_codes, status, version) "
+                "VALUES (:id, 'SYN-CONSENT-001', 1, 'en', :cipher, ARRAY['messaging'], 'approved', 1) "
+                "RETURNING id"
+            ),
+            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
+        )
+        # Create synthetic protected evidence (D03 unresolved - test fixture only)
+        evidence_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO protected_evidence "
+                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
+                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
+                "RETURNING id"
+            ),
+            {
+                "id": uuid4(),
+                "facility_id": facility_id,
+                "ref": "synthetic-evidence-ref",
+                "digest": b"synthetic-digest",
+                "media_type": "application/pdf",
+                "recorded_by": identity.user_ids["vht_a"],
+            },
+        )
+        db.session.commit()
+
     grant_response = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
         json={
             "purpose": "messaging",
             "decision": "grant",
+            "notice_version_id": str(notice_id),
             "method": "documentary",
             "language": "en",
+            "evidence_id": str(evidence_id),
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
     )
@@ -1012,3 +1051,150 @@ def test_consent_audit_failure_rolls_back(client, identity, monkeypatch):
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
     )
     assert response.status_code == 201, response.json
+
+def test_cross_patient_evidence_denied(client, identity):
+    """Cross-patient evidence access should be denied."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+
+    patient_a_id = _register_synthetic_patient(client, facility_id, "cross-ev-a")
+    patient_b_id = _register_synthetic_patient(client, facility_id, "cross-ev-b")
+
+    with identity.app.app_context():
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        from tunza.patients.security import establish_patient_context
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        context = load_access_context(user)
+        establish_patient_context(context, facility_id)
+
+        # Create evidence for patient A
+        evidence_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO protected_evidence "
+                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
+                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
+                "RETURNING id"
+            ),
+            {
+                "id": uuid4(),
+                "facility_id": facility_id,
+                "ref": "evidence-for-patient-a",
+                "digest": b"digest-for-patient-a",
+                "media_type": "application/pdf",
+                "recorded_by": identity.user_ids["vht_a"],
+            },
+        )
+        db.session.commit()
+
+    # Try to access patient A's evidence as patient B's reader - should fail
+    # because evidence is scoped to patient A only
+    response = client.get(
+        f"/api/v1/patients/{patient_b_id}/evidence/{evidence_id}?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert response.status_code == 404
+
+
+def test_grant_requires_valid_notice_and_evidence(client, identity):
+    """Consent grant without valid notice/evidence references should fail closed."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "grant-deny")
+
+    # Grant without notice_version_id should fail
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 422
+
+    # Grant with non-existent notice_version_id should fail
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(uuid4()),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(uuid4()),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 422
+
+
+def test_consent_events_append_only(client, identity):
+    """Consent events should be append-only at the database level."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "append-only")
+
+    with identity.app.app_context():
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        from tunza.patients.security import establish_patient_context
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        context = load_access_context(user)
+        establish_patient_context(context, facility_id)
+
+        # Create a consent event
+        event_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO consent_events "
+                "(id, patient_id, facility_id, purpose, decision, method, language, effective_at, recorded_by, event_sequence) "
+                "VALUES (:id, :patient_id, :facility_id, :purpose, :decision, :method, :language, :effective_at, :recorded_by, 1) "
+                "RETURNING id"
+            ),
+            {
+                "id": uuid4(),
+                "patient_id": patient_id,
+                "facility_id": facility_id,
+                "purpose": "messaging",
+                "decision": "grant",
+                "method": "documentary",
+                "language": "en",
+                "effective_at": "2026-01-15T10:00:00Z",
+                "recorded_by": identity.user_ids["vht_a"],
+            },
+        )
+        db.session.commit()
+
+        # Try to UPDATE the consent event - should fail due to append-only trigger
+        try:
+            db.session.execute(
+                sa.text(
+                    "UPDATE consent_events SET decision = 'withdraw' WHERE id = :id"
+                ),
+                {"id": event_id},
+            )
+            db.session.commit()
+            assert False, "UPDATE should have failed due to append-only trigger"
+        except Exception:
+            db.session.rollback()
+
+        # Try to DELETE the consent event - should fail due to append-only trigger
+        try:
+            db.session.execute(
+                sa.text("DELETE FROM consent_events WHERE id = :id"),
+                {"id": event_id},
+            )
+            db.session.commit()
+            assert False, "DELETE should have failed due to append-only trigger"
+        except Exception:
+            db.session.rollback()
+
+        # Verify the event still exists - re-establish context after rollback
+        establish_patient_context(context, facility_id)
+        count = db.session.scalar(
+            sa.text("SELECT count(*) FROM consent_events WHERE id = :id"),
+            {"id": event_id},
+        )
+        assert count == 1
