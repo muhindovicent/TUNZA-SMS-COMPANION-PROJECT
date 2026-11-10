@@ -26,6 +26,14 @@ interface ConsentNotice {
   version: number
 }
 
+interface EvidenceReference {
+  id: string
+  storage_reference: string
+  media_type: string
+  recorded_by: string
+  version: number
+}
+
 interface ConsentEvent {
   id: string
   patient_id: string
@@ -46,8 +54,9 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
   const [eligibility, setEligibility] = useState<EligibilityCheck | null>(null)
   const [consentEvents, setConsentEvents] = useState<ConsentEvent[]>([])
   const [consentNotices, setConsentNotices] = useState<ConsentNotice[]>([])
+  const [evidenceReferences, setEvidenceReferences] = useState<EvidenceReference[]>([])
   const [selectedNoticeId, setSelectedNoticeId] = useState<string | null>(null)
-  const [evidenceReference, setEvidenceReference] = useState('')
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState('uncertain')
@@ -71,8 +80,9 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
     setPatient(null)
     setEligibility(null)
     setConsentEvents([])
+    setEvidenceReferences([])
     setSelectedNoticeId(null)
-    setEvidenceReference('')
+    setSelectedEvidenceId(null)
     setMessage('')
     setBusy(true)
     try {
@@ -91,6 +101,7 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
         setPatient(found)
         await loadEligibility(found.id)
         await loadConsentEvents(found.id)
+        await loadEvidenceReferences(found.id)
       }
     } catch {
       setMessage('Search could not be completed.')
@@ -118,6 +129,17 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
       setConsentEvents(events || [])
     } catch {
       setConsentEvents([])
+    }
+  }
+
+  async function loadEvidenceReferences(patientId: string) {
+    try {
+      const response = await apiFetch<{ data: EvidenceReference[] }>(`/patients/${encodeURIComponent(patientId)}/evidence?facility_id=${encodeURIComponent(facility)}`, {
+        method: 'GET',
+      })
+      setEvidenceReferences(response.data || [])
+    } catch {
+      setEvidenceReferences([])
     }
   }
 
@@ -159,10 +181,13 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
           setBusy(false)
           return
         }
-        body.notice_version_id = selectedNoticeId
-        if (evidenceReference) {
-          body.evidence_id = evidenceReference
+        if (!selectedEvidenceId) {
+          setMessage('An evidence reference must be selected for grant.')
+          setBusy(false)
+          return
         }
+        body.notice_version_id = selectedNoticeId
+        body.evidence_id = selectedEvidenceId
       }
       await apiFetch<ConsentEvent>(`/patients/${encodeURIComponent(patient.id)}/consent-events?facility_id=${encodeURIComponent(facility)}`, {
         method: 'POST',
@@ -170,8 +195,9 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
         idempotencyKey: crypto.randomUUID(),
       })
       await loadConsentEvents(patient.id)
+      await loadEvidenceReferences(patient.id)
       setSelectedNoticeId(null)
-      setEvidenceReference('')
+      setSelectedEvidenceId(null)
       setMessage(`Consent ${consentDecision} recorded.`)
     } catch {
       setMessage('Consent could not be recorded.')
@@ -186,6 +212,9 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
       && selectedNotice.purpose_codes.includes(consentPurpose)
       && selectedNotice.language === 'en'
     : false
+
+  const selectedEvidence = evidenceReferences.find(e => e.id === selectedEvidenceId)
+  const evidenceValid = selectedEvidence ? true : false
 
   return (
     <section className="content-width" aria-labelledby="eligibility-consent-title">
@@ -262,9 +291,17 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
                 </select>
               </label>
               <label>Evidence reference
-                <input value={evidenceReference} onChange={(event) => setEvidenceReference(event.target.value)} placeholder="Optional evidence reference" />
+                <select value={selectedEvidenceId ?? ''} onChange={(event) => setSelectedEvidenceId(event.target.value || null)}>
+                  <option value="">Select evidence</option>
+                  {evidenceReferences.map((evidence) => (
+                    <option key={evidence.id} value={evidence.id}>
+                      {evidence.storage_reference} ({evidence.media_type})
+                    </option>
+                  ))}
+                </select>
               </label>
               {!noticeValid && selectedNoticeId && <p role="status" style={{ color: 'red' }}>Selected notice is not valid for this purpose/language.</p>}
+              {!evidenceValid && selectedEvidenceId === null && consentDecision === 'grant' && <p role="status" style={{ color: 'red' }}>An evidence reference is required for grant.</p>}
             </>}
             <label>Method
               <select value={consentMethod} onChange={(event) => setConsentMethod(event.target.value)}>
@@ -272,7 +309,7 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
                 <option value="verbal">Verbal</option>
               </select>
             </label>
-            <button type="submit" disabled={busy || (consentDecision === 'grant' && (!selectedNoticeId || !noticeValid)) || (!canWithdrawConsent && consentDecision === 'withdraw')}>
+            <button type="submit" disabled={busy || (consentDecision === 'grant' && (!selectedNoticeId || !noticeValid || !selectedEvidenceId)) || (!canWithdrawConsent && consentDecision === 'withdraw')}>
               Record consent {consentDecision}
             </button>
           </form>

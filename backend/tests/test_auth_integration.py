@@ -1319,7 +1319,7 @@ def test_concurrent_consent_sequence_safety(identity):
 
 
 def test_consent_withdraw_requires_facility_scope(client, identity):
-    """Withdraw consent must be blocked when the staff lacks facility-scoped consent.withdraw."""
+    """Legitimate same-facility withdrawal succeeds with facility-scoped consent.withdraw."""
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "withdraw-scope")
@@ -1343,7 +1343,7 @@ def test_consent_withdraw_requires_facility_scope(client, identity):
     )
     assert grant_response.status_code == 201, grant_response.json
 
-    # vht.a has consent.record but NOT consent.withdraw permission -> withdraw denied
+    # vht.a has consent.withdraw facility-scoped to TST-A -> same-facility withdrawal succeeds
     withdraw_response = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
         json={
@@ -1353,6 +1353,48 @@ def test_consent_withdraw_requires_facility_scope(client, identity):
             "language": "en",
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert withdraw_response.status_code == 201, withdraw_response.json
+    assert withdraw_response.json["data"]["decision"] == "withdraw"
+
+
+def test_consent_withdraw_denied_without_facility_scope(client, identity):
+    """Cross-facility withdrawal denied without facility-scoped consent.withdraw."""
+    # Register patient at TST-A as vht.a
+    _login(client, "tst.vht.a")
+    facility_a = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_a, "withdraw-cross")
+
+    # Register a grant first (as vht.a at TST-A)
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_a, identity.user_ids["vht_a"], "WITHDRAW-CROSS"
+    )
+    client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_a}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+
+    # vht.b has consent.withdraw via VHT role but only facility-scoped to TST-B, not TST-A
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+
+    withdraw_response = client_b.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_a}",
+        json={
+            "purpose": "messaging",
+            "decision": "withdraw",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": str(uuid4())},
     )
     assert withdraw_response.status_code == 404, withdraw_response.json
 

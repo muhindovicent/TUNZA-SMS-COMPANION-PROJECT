@@ -24,6 +24,7 @@ describe('synthetic eligibility and consent', () => {
       .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ data: [] })
     render(<EligibilityConsent identity={identity} />)
     fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
     fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))
@@ -39,6 +40,7 @@ describe('synthetic eligibility and consent', () => {
       .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({} as Record<string, unknown>)
     render(<EligibilityConsent identity={identity} />)
     fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
@@ -56,18 +58,20 @@ describe('synthetic eligibility and consent', () => {
     expect(eligibilityCall![1]?.body).toEqual({ method: 'documentary', result: 'verified', checked_at: expect.any(String) })
   })
 
-  it('records consent grant with notice', async () => {
+  it('records consent grant with notice and evidence', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce([{ id: 'notice-1', notice_code: 'SYN-CONSENT-001', revision: 1, language: 'en', status: 'approved', purpose_codes: ['messaging'], effective_from: null, effective_to: null, version: 1 }])
       .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ data: [{ id: 'evidence-1', storage_reference: 'synthetic-evidence-ref', media_type: 'application/pdf', recorded_by: 'user', version: 1 }] })
       .mockResolvedValueOnce({} as Record<string, unknown>)
     render(<EligibilityConsent identity={identity} />)
     fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
     fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))
     await screen.findByText(/Patient:/)
     fireEvent.change(screen.getByLabelText('Consent notice'), { target: { value: 'notice-1' } })
+    fireEvent.change(screen.getByLabelText('Evidence reference'), { target: { value: 'evidence-1' } })
     fireEvent.click(screen.getByRole('button', { name: 'Record consent grant' }))
     await screen.findByText('Consent grant recorded.')
     const consentCall = vi.mocked(apiFetch).mock.calls.find((call) =>
@@ -82,6 +86,7 @@ describe('synthetic eligibility and consent', () => {
       method: 'documentary',
       language: 'en',
       notice_version_id: 'notice-1',
+      evidence_id: 'evidence-1',
     })
   })
 
@@ -97,6 +102,7 @@ describe('synthetic eligibility and consent', () => {
       .mockResolvedValueOnce([{ id: 'patient', facility_id: 'facility', local_reference: 'SYN-ADULT-TEST' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ data: [] })
     render(<EligibilityConsent identity={identity} />)
     fireEvent.change(screen.getByLabelText('Synthetic reference'), { target: { value: 'SYN-ADULT-TEST' } })
     fireEvent.click(screen.getByRole('button', { name: 'Find patient' }))

@@ -942,12 +942,13 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             separators=(",", ":"),
         ).encode()
     ).digest()
-    # Idempotency: bind to patient + actor + endpoint + request fingerprint
+    # Idempotency: bind to patient + actor + facility + request fingerprint
     existing = db.session.scalar(
         select(ConsentEvent).where(
             ConsentEvent.patient_id == patient_id,
             ConsentEvent.facility_id == facility_id,
             ConsentEvent.idempotency_key == idempotency_key,
+            ConsentEvent.actor_id == context.user.id,
         )
     )
     if existing is not None:
@@ -1068,4 +1069,57 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
             "recorded_by": str(evidence.recorded_by),
             "version": evidence.version,
         }
+    ), 200
+
+
+@blueprint.get("/<uuid:patient_id>/evidence")
+@require_permission("consent.read")
+def list_evidence(patient_id: UUID) -> tuple[Response, int]:
+    context = get_access_context()
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    if facility_id is None:
+        return _error("validation_failed", "A valid facility context is required.", 422)
+    if not facility_scope_allows(context, facility_id, "consent.read"):
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "consent.read", "unavailable")
+    evidence_rows = list(
+        db.session.scalars(
+            select(ProtectedEvidence).where(
+                ProtectedEvidence.facility_id == facility_id,
+            )
+        ).all()
+    )
+    try:
+        _record_patient_audit(
+            context=context,
+            permission="consent.read",
+            action="evidence.list",
+            facility_id=facility_id,
+            patient_id=patient_id,
+        )
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(
+        data=[
+            {
+                "id": str(evidence.id),
+                "storage_reference": evidence.storage_reference,
+                "media_type": evidence.media_type,
+                "recorded_by": str(evidence.recorded_by),
+                "version": evidence.version,
+            }
+            for evidence in evidence_rows
+        ]
     ), 200
