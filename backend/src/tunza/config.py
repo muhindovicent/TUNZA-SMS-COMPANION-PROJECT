@@ -1,6 +1,9 @@
 """Explicit environment-based configuration, with no credential fallbacks."""
 
+import base64
+import hashlib
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -10,6 +13,8 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 
 ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+_ROLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+_KEY_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class ConfigurationError(ValueError):
@@ -55,6 +60,25 @@ def _boolean(value: Any, name: str) -> bool:
     raise ConfigurationError(f"{name} must be true or false.")
 
 
+def _patient_encryption_key(values: Mapping[str, Any], environment: str, secret: str) -> bytes:
+    encoded = values.get("PATIENT_ENCRYPTION_KEY", "")
+    if encoded:
+        if not isinstance(encoded, str):
+            raise ConfigurationError("PATIENT_ENCRYPTION_KEY must be base64url text.")
+        try:
+            key = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        except (ValueError, TypeError):
+            raise ConfigurationError(
+                "PATIENT_ENCRYPTION_KEY must be valid base64url text."
+            ) from None
+        if len(key) != 32:
+            raise ConfigurationError("PATIENT_ENCRYPTION_KEY must decode to exactly 32 bytes.")
+        return key
+    if environment == "production":
+        raise ConfigurationError("PATIENT_ENCRYPTION_KEY is required in production.")
+    return hashlib.sha256(f"tunza-patient-development-key:{secret}".encode()).digest()
+
+
 def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     # Use the explicit repository file, never a parent directory's unrelated .env.
     # Process environment values always win. Tests can supply all required values.
@@ -71,6 +95,18 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         raise ConfigurationError(
             "SECRET_KEY must contain at least 32 characters generated locally."
         )
+
+    runtime_role = values.get("DATABASE_RUNTIME_ROLE", "tunza_runtime")
+    if not isinstance(runtime_role, str) or not _ROLE_PATTERN.fullmatch(runtime_role):
+        raise ConfigurationError("DATABASE_RUNTIME_ROLE must be a safe PostgreSQL role name.")
+    patient_key_version = values.get("PATIENT_KEY_VERSION", "synthetic-v1")
+    if not isinstance(patient_key_version, str) or not _KEY_VERSION_PATTERN.fullmatch(
+        patient_key_version
+    ):
+        raise ConfigurationError("PATIENT_KEY_VERSION must be a short safe identifier.")
+    if environment == "production" and "PATIENT_KEY_VERSION" not in values:
+        raise ConfigurationError("PATIENT_KEY_VERSION is required in production.")
+    patient_encryption_key = _patient_encryption_key(values, environment, secret)
 
     database_url = postgres_url(values.get("DATABASE_URL"))
     migration_url = values.get("MIGRATION_DATABASE_URL")
@@ -127,6 +163,9 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         ),
         "SQLALCHEMY_TRACK_MODIFICATIONS": False,
         "SQLALCHEMY_ECHO": False,
+        "DATABASE_RUNTIME_ROLE": runtime_role,
+        "PATIENT_ENCRYPTION_KEY": patient_encryption_key,
+        "PATIENT_KEY_VERSION": patient_key_version,
         "SQLALCHEMY_ENGINE_OPTIONS": {
             "pool_pre_ping": True,
             "pool_size": 5,

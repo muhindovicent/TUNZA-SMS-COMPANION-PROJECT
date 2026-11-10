@@ -4,7 +4,7 @@ import os
 import secrets
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import create_engine, inspect, text
 
 from tunza import create_app
 from tunza.config import postgres_url
@@ -41,6 +41,7 @@ def test_postgres_migration_roundtrip_and_readiness():
             "MIGRATION_DATABASE_URL": migration_value,
         }
     )
+    migration_engine = create_engine(migration_url, hide_parameters=True)
     with application.app_context():
         try:
             tables = inspect(db.engine).get_table_names()
@@ -49,24 +50,46 @@ def test_postgres_migration_roundtrip_and_readiness():
             for _ in range(2):
                 result = runner.invoke(args=["db", "upgrade"])
                 assert result.exit_code == 0, result.output
-            with db.engine.connect() as connection:
+            with migration_engine.connect() as connection:
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0003_staff_administration"
+                assert revision == "0004_patient_registry"
             expected_tables = {
                 "alembic_version",
                 "audit_events",
                 "auth_sessions",
+                "communication_preferences",
+                "episode_facility_assignments",
                 "facilities",
                 "facility_memberships",
+                "facility_patient_profiles",
+                "participant_assignments",
+                "patients",
                 "permissions",
+                "pregnancy_episodes",
                 "role_bindings",
                 "role_permissions",
                 "roles",
                 "users",
             }
             assert set(inspect(db.engine).get_table_names()) == expected_tables
+            with db.engine.connect() as connection:
+                assert (
+                    connection.execute(text("SELECT current_user")).scalar_one() == "tunza_runtime"
+                )
+                connection.execute(
+                    text("SELECT set_config('tunza.facility_id', :facility, true)"),
+                    {"facility": "00000000-0000-4000-8000-000000000001"},
+                )
+            with db.engine.connect() as connection:
+                assert (
+                    connection.execute(text("SELECT current_user")).scalar_one() == "tunza_runtime"
+                )
+                assert not connection.execute(
+                    text("SELECT current_setting('tunza.facility_id', true)")
+                ).scalar_one()
+                assert connection.execute(text("SELECT count(*) FROM patients")).scalar_one() == 0
             response = application.test_client().get("/api/v1/health/ready")
             assert response.status_code == 200
             assert response.json["data"]["checks"]["database"] == "connected"
@@ -74,7 +97,7 @@ def test_postgres_migration_roundtrip_and_readiness():
             assert result.exit_code == 0, result.output
             result = runner.invoke(args=["db", "downgrade", "base"])
             assert result.exit_code == 0, result.output
-            with db.engine.connect() as connection:
+            with migration_engine.connect() as connection:
                 revision_count = connection.execute(
                     text("SELECT count(*) FROM alembic_version")
                 ).scalar_one()
@@ -84,3 +107,4 @@ def test_postgres_migration_roundtrip_and_readiness():
         finally:
             db.session.remove()
             db.engine.dispose()
+            migration_engine.dispose()

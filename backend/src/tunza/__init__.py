@@ -8,6 +8,7 @@ from flask import Flask
 
 from tunza.config import build_config
 from tunza.csrf import register_csrf_protection
+from tunza.database_security import register_runtime_role
 from tunza.extensions import db, migrate
 from tunza.http import register_http_handlers
 from tunza.services.rate_limit import SlidingWindowRateLimiter
@@ -18,6 +19,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.config.from_mapping(build_config(config))
 
     db.init_app(app)
+    register_runtime_role(app)
     migrate.init_app(app, db, directory=str(Path(__file__).resolve().parents[2] / "migrations"))
     register_http_handlers(app)
     register_csrf_protection(app)
@@ -30,11 +32,14 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     from tunza.identity import admin as identity_admin  # noqa: F401
     from tunza.identity import admin_blueprint, auth_blueprint, facilities_blueprint
     from tunza.identity import routes as identity_routes  # noqa: F401
+    from tunza.patients import blueprint as patients_blueprint
+    from tunza.patients import routes as patient_routes  # noqa: F401
 
     app.register_blueprint(health_blueprint, url_prefix="/api/v1/health")
     app.register_blueprint(auth_blueprint)
     app.register_blueprint(facilities_blueprint)
     app.register_blueprint(admin_blueprint)
+    app.register_blueprint(patients_blueprint)
 
     from tunza.commands import seed_synthetic_identity
 

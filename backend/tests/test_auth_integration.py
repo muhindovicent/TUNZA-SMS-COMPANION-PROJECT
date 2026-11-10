@@ -491,13 +491,13 @@ def test_audit_events_reject_updates_and_deletes(client, identity):
             select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(1)
         )
         assert event is not None
-        with pytest.raises(DBAPIError, match="append-only"):
+        with pytest.raises(DBAPIError, match="permission denied|append-only"):
             db.session.execute(
                 text("UPDATE audit_events SET outcome = 'success' WHERE id = :event_id"),
                 {"event_id": event.id},
             )
         db.session.rollback()
-        with pytest.raises(DBAPIError, match="append-only"):
+        with pytest.raises(DBAPIError, match="permission denied|append-only"):
             db.session.execute(
                 text("DELETE FROM audit_events WHERE id = :event_id"),
                 {"event_id": event.id},
