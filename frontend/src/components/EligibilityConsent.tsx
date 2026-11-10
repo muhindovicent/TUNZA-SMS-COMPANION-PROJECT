@@ -62,10 +62,10 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
   const canReadConsent = identity.permissions.includes('consent.read')
 
   useEffect(() => {
-    apiFetch<ConsentNotice[]>('/consent-notices?purpose=messaging&language=en', { method: 'GET' })
+    apiFetch<ConsentNotice[]>(`/consent-notices?purpose=messaging&language=en&facility_id=${encodeURIComponent(facility)}`, { method: 'GET' })
       .then(notices => setConsentNotices(notices || []))
       .catch(() => setConsentNotices([]))
-  }, [])
+  }, [facility])
 
   async function findPatient() {
     setPatient(null)

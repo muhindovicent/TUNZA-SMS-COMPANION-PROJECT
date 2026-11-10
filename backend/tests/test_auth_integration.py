@@ -1161,6 +1161,26 @@ def test_consent_events_append_only(client, identity):
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "append-only")
 
+    # Create a consent event through the API (existing visible row)
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "APPEND"
+    )
+    create_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert create_response.status_code == 201, create_response.json
+    event_id = create_response.json["data"]["id"]
+    original_decision = create_response.json["data"]["decision"]
+
     with identity.app.app_context():
         from tunza.access import load_access_context
         from tunza.identity.models import User
@@ -1170,59 +1190,47 @@ def test_consent_events_append_only(client, identity):
         context = load_access_context(user)
         establish_patient_context(context, facility_id)
 
-        # Create a consent event
-        event_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO consent_events "
-                "(id, patient_id, facility_id, purpose, decision, "
-                "method, language, effective_at, recorded_by, "
-                "idempotency_key, request_hash, event_sequence) "
-                "VALUES (:id, :patient_id, :facility_id, :purpose, :decision, "
-                ":method, :language, :effective_at, :recorded_by, "
-                ":idempotency_key, :request_hash, 1) "
-                "RETURNING id"
-            ),
-            {
-                "id": uuid4(),
-                "patient_id": patient_id,
-                "facility_id": facility_id,
-                "purpose": "messaging",
-                "decision": "grant",
-                "method": "documentary",
-                "language": "en",
-                "effective_at": "2026-01-15T10:00:00Z",
-                "recorded_by": identity.user_ids["vht_a"],
-                "idempotency_key": str(uuid4()),
-                "request_hash": b"synthetic-request-hash",
-            },
-        )
-        db.session.commit()
-
         # Try to UPDATE the consent event - should fail due to append-only trigger
-        with pytest.raises(DBAPIError, match="append-only"):
+        try:
             db.session.execute(
                 sa.text("UPDATE consent_events SET decision = 'withdraw' WHERE id = :id"),
                 {"id": event_id},
             )
             db.session.commit()
-        db.session.rollback()
+            raise AssertionError("UPDATE should have failed due to append-only trigger")
+        except DBAPIError:
+            db.session.rollback()
+
+        # Re-establish context after rollback
+        establish_patient_context(context, facility_id)
+
+        # Explicit affected-row check: row must be unchanged
+        unchanged = db.session.scalar(
+            sa.text("SELECT decision FROM consent_events WHERE id = :id"),
+            {"id": event_id},
+        )
+        assert unchanged == original_decision, "Row was modified despite append-only trigger"
 
         # Try to DELETE the consent event - should fail due to append-only trigger
-        with pytest.raises(DBAPIError, match="append-only"):
+        try:
             db.session.execute(
                 sa.text("DELETE FROM consent_events WHERE id = :id"),
                 {"id": event_id},
             )
             db.session.commit()
-        db.session.rollback()
+            raise AssertionError("DELETE should have failed due to append-only trigger")
+        except DBAPIError:
+            db.session.rollback()
 
-        # Verify the event still exists - re-establish context after rollback
+        # Re-establish context after rollback
         establish_patient_context(context, facility_id)
+
+        # Explicit affected-row check: row must still exist
         count = db.session.scalar(
             sa.text("SELECT count(*) FROM consent_events WHERE id = :id"),
             {"id": event_id},
         )
-        assert count == 1
+        assert count == 1, "Row was deleted despite append-only trigger"
 
 
 def test_concurrent_eligibility_sequence_safety(identity):

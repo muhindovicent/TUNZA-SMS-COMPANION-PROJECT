@@ -115,8 +115,10 @@ def upgrade() -> None:
     )
     _enable_rls(
         "consent_notice_versions",
-        "tunza_current_uuid('tunza.actor_id') IS NOT NULL",
-        "tunza_current_uuid('tunza.actor_id') IS NOT NULL",
+        "tunza_current_uuid('tunza.actor_id') IS NOT NULL "
+        "AND tunza_current_uuid('tunza.facility_id') IS NOT NULL",
+        "tunza_current_uuid('tunza.actor_id') IS NOT NULL "
+        "AND tunza_current_uuid('tunza.facility_id') IS NOT NULL",
     )
     op.execute(f"GRANT SELECT ON consent_notice_versions TO {RUNTIME_ROLE}")
 

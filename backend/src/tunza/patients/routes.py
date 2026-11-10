@@ -74,6 +74,12 @@ def _validate_idempotency_key() -> str | None:
     return value
 
 
+def _advisory_lock_key(namespace: str, patient_id: UUID, facility_id: UUID) -> int:
+    """Deterministic transaction-scoped advisory lock key (stable across processes)."""
+    digest = hashlib.sha256(f"{namespace}:{patient_id}:{facility_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") % (2**31)
+
+
 def _patient_projection(
     profile: FacilityPatientProfile,
     preference: CommunicationPreference,
@@ -607,51 +613,47 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
             )
         return jsonify(data=_eligibility_projection(existing)), 201
     try:
-        # Use advisory lock for concurrency control instead of locking history rows
+        # Use transaction-scoped advisory lock for concurrency control
+        # (automatically released at transaction end - no lock leakage)
+        lock_id = _advisory_lock_key("eligibility", patient_id, facility_id)
         db.session.execute(
-            sa.text("SELECT pg_advisory_lock(:lock_id)"),
-            {"lock_id": abs(hash(f"{patient_id}:{facility_id}")) % (2**31)},
+            sa.text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": lock_id},
         )
-        try:
-            max_sequence = db.session.scalar(
-                select(sa.func.max(AdultEligibilityCheck.sequence)).where(
-                    AdultEligibilityCheck.patient_id == patient_id,
-                    AdultEligibilityCheck.facility_id == facility_id,
-                )
+        max_sequence = db.session.scalar(
+            select(sa.func.max(AdultEligibilityCheck.sequence)).where(
+                AdultEligibilityCheck.patient_id == patient_id,
+                AdultEligibilityCheck.facility_id == facility_id,
             )
-            next_sequence = (max_sequence or 0) + 1
-            now = datetime.now(UTC)
-            check = AdultEligibilityCheck(
-                id=uuid4(),
-                patient_id=patient_id,
-                facility_id=facility_id,
-                method=method,
-                result=result,
-                checked_at=now,
-                checked_by=context.user.id,
-                actor_id=context.user.id,
-                evidence_id=evidence_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                sequence=next_sequence,
-            )
-            db.session.add(check)
-            _record_patient_audit(
-                context=context,
-                permission="eligibility.record",
-                action="eligibility.record",
-                facility_id=facility_id,
-                patient_id=patient_id,
-                metadata={"result": result, "method": method[:64]},
-            )
-            db.session.flush()
-            response_data = _eligibility_projection(check)
-            db.session.commit()
-        finally:
-            db.session.execute(
-                sa.text("SELECT pg_advisory_unlock(:lock_id)"),
-                {"lock_id": abs(hash(f"{patient_id}:{facility_id}")) % (2**31)},
-            )
+        )
+        next_sequence = (max_sequence or 0) + 1
+        now = datetime.now(UTC)
+        check = AdultEligibilityCheck(
+            id=uuid4(),
+            patient_id=patient_id,
+            facility_id=facility_id,
+            method=method,
+            result=result,
+            checked_at=now,
+            checked_by=context.user.id,
+            actor_id=context.user.id,
+            evidence_id=evidence_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            sequence=next_sequence,
+        )
+        db.session.add(check)
+        _record_patient_audit(
+            context=context,
+            permission="eligibility.record",
+            action="eligibility.record",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"result": result, "method": method[:64]},
+        )
+        db.session.flush()
+        response_data = _eligibility_projection(check)
+        db.session.commit()
     except IntegrityError:
         db.session.rollback()
         return _error("conflict", "The eligibility check already exists.", 409)
@@ -674,8 +676,14 @@ def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
 @require_permission("consent.read")
 def list_consent_notices() -> tuple[Response, int]:
     context = get_access_context()
+    facility_id = _parse_uuid(request.args.get("facility_id"))
     purpose = request.args.get("purpose")
     language = request.args.get("language")
+    if facility_id is None:
+        return _error("validation_failed", "A valid facility context is required.", 422)
+    if not facility_scope_allows(context, facility_id, "consent.read"):
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    establish_patient_context(context, facility_id)
     query = select(ConsentNoticeVersion).where(ConsentNoticeVersion.status == "approved")
     if purpose:
         query = query.where(ConsentNoticeVersion.purpose_codes.contains([purpose]))
@@ -705,7 +713,7 @@ def list_consent_notices() -> tuple[Response, int]:
             context=context,
             permission="consent.read",
             action="consent.notice.list",
-            facility_id=None,
+            facility_id=facility_id,
             patient_id=None,
             metadata={"purpose": purpose, "language": language},
         )
@@ -829,6 +837,15 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             return _deny_patient_access(context, "consent.withdraw", "permission")
         if not facility_scope_allows(context, facility_id, "consent.withdraw"):
             return _deny_patient_access(context, "consent.withdraw", "facility_scope")
+    # Establish RLS context before any data access (notice/evidence validation)
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "consent.record", "unavailable")
     # For grant decisions, require a valid approved notice covering the purpose,
     # matching language, and within its effective window; plus valid evidence
     notice = None
@@ -925,14 +942,6 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             separators=(",", ":"),
         ).encode()
     ).digest()
-    establish_patient_context(context, facility_id)
-    profile = db.session.scalar(
-        _assigned_profiles(context, facility_id).where(
-            FacilityPatientProfile.patient_id == patient_id
-        )
-    )
-    if profile is None:
-        return _deny_patient_access(context, "consent.record", "unavailable")
     # Idempotency: bind to patient + actor + endpoint + request fingerprint
     existing = db.session.scalar(
         select(ConsentEvent).where(
@@ -949,54 +958,50 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
         return jsonify(data=_consent_event_projection(existing)), 201
     now = datetime.now(UTC)
     try:
-        # Use advisory lock for concurrency control instead of locking history rows
+        # Use transaction-scoped advisory lock for concurrency control
+        # (automatically released at transaction end - no lock leakage)
+        lock_id = _advisory_lock_key("consent", patient_id, facility_id)
         db.session.execute(
-            sa.text("SELECT pg_advisory_lock(:lock_id)"),
-            {"lock_id": abs(hash(f"consent:{patient_id}:{facility_id}")) % (2**31)},
+            sa.text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": lock_id},
         )
-        try:
-            max_sequence = db.session.scalar(
-                select(sa.func.max(ConsentEvent.event_sequence)).where(
-                    ConsentEvent.patient_id == patient_id,
-                    ConsentEvent.facility_id == facility_id,
-                )
+        max_sequence = db.session.scalar(
+            select(sa.func.max(ConsentEvent.event_sequence)).where(
+                ConsentEvent.patient_id == patient_id,
+                ConsentEvent.facility_id == facility_id,
             )
-            next_sequence = (max_sequence or 0) + 1
-            event = ConsentEvent(
-                id=uuid4(),
-                patient_id=patient_id,
-                facility_id=facility_id,
-                episode_id=None,
-                notice_version_id=notice_version_id,
-                purpose=purpose,
-                decision=decision,
-                method=method,
-                language=language,
-                effective_at=now,
-                recorded_by=context.user.id,
-                evidence_id=evidence_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                supersedes_id=supersedes_id,
-                event_sequence=next_sequence,
-            )
-            db.session.add(event)
-            _record_patient_audit(
-                context=context,
-                permission="consent.record",
-                action=f"consent.{decision}",
-                facility_id=facility_id,
-                patient_id=patient_id,
-                metadata={"purpose": purpose, "decision": decision, "method": method[:64]},
-            )
-            db.session.flush()
-            response_data = _consent_event_projection(event)
-            db.session.commit()
-        finally:
-            db.session.execute(
-                sa.text("SELECT pg_advisory_unlock(:lock_id)"),
-                {"lock_id": abs(hash(f"consent:{patient_id}:{facility_id}")) % (2**31)},
-            )
+        )
+        next_sequence = (max_sequence or 0) + 1
+        event = ConsentEvent(
+            id=uuid4(),
+            patient_id=patient_id,
+            facility_id=facility_id,
+            episode_id=None,
+            notice_version_id=notice_version_id,
+            purpose=purpose,
+            decision=decision,
+            method=method,
+            language=language,
+            effective_at=now,
+            recorded_by=context.user.id,
+            evidence_id=evidence_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            supersedes_id=supersedes_id,
+            event_sequence=next_sequence,
+        )
+        db.session.add(event)
+        _record_patient_audit(
+            context=context,
+            permission="consent.record",
+            action=f"consent.{decision}",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"purpose": purpose, "decision": decision, "method": method[:64]},
+        )
+        db.session.flush()
+        response_data = _consent_event_projection(event)
+        db.session.commit()
     except IntegrityError:
         db.session.rollback()
         return _error("conflict", "The consent event could not be recorded.", 409)
