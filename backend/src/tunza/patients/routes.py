@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from flask import Response, current_app, g, jsonify, request
 from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
@@ -19,12 +20,16 @@ from tunza.extensions import db
 from tunza.identity.models import FacilityMembership
 from tunza.patients import blueprint
 from tunza.patients.models import (
+    AdultEligibilityCheck,
     CommunicationPreference,
+    ConsentEvent,
+    ConsentNoticeVersion,
     EpisodeFacilityAssignment,
     FacilityPatientProfile,
     ParticipantAssignment,
     Patient,
     PregnancyEpisode,
+    ProtectedEvidence,
     RegistrationIdempotency,
 )
 from tunza.patients.security import establish_patient_context
@@ -132,7 +137,13 @@ def _assigned_profiles(context, facility_id: UUID):
 
 
 def _record_patient_audit(
-    *, context, permission: str, action: str, facility_id: UUID, patient_id: UUID | None
+    *,
+    context,
+    permission: str,
+    action: str,
+    facility_id: UUID,
+    patient_id: UUID | None,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     record_audit(
         permission=permission,
@@ -143,7 +154,8 @@ def _record_patient_audit(
         actor_id=context.user.id,
         facility_id=facility_id,
         resource_id=patient_id,
-        metadata={"method": "local_reference"} if action == "patient.search" else None,
+        metadata=metadata
+        or ({"method": "local_reference"} if action == "patient.search" else None),
     )
 
 
@@ -465,3 +477,357 @@ def patient_detail(patient_id: UUID) -> tuple[Response, int]:
     response = jsonify(data=data)
     response.headers["ETag"] = f'"{version}"'
     return response, 200
+
+
+def _eligibility_projection(check: AdultEligibilityCheck) -> dict[str, object]:
+    return {
+        "id": str(check.id),
+        "patient_id": str(check.patient_id),
+        "facility_id": str(check.facility_id),
+        "method": check.method,
+        "result": check.result,
+        "checked_at": check.checked_at.isoformat(),
+        "version": check.version,
+    }
+
+
+@blueprint.post("/<uuid:patient_id>/eligibility")
+@require_permission("eligibility.record")
+def record_eligibility(patient_id: UUID) -> tuple[Response, int]:
+    context = get_access_context()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error("validation_failed", "A JSON request body is required.", 422)
+    if set(payload) - {"method", "result", "checked_at", "evidence_id"}:
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    method = payload.get("method")
+    result = payload.get("result")
+    checked_at = payload.get("checked_at")
+    evidence_id = _parse_uuid(payload.get("evidence_id"))
+    if (
+        not isinstance(method, str)
+        or not isinstance(result, str)
+        or result not in {"verified", "uncertain", "ineligible"}
+        or not isinstance(checked_at, str)
+        or evidence_id is not None
+    ):
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    if facility_id is None:
+        return _error("validation_failed", "A valid facility context is required.", 422)
+    if not facility_scope_allows(context, facility_id, "eligibility.record"):
+        return _deny_patient_access(context, "eligibility.record", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "eligibility.record", "facility_scope")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "eligibility.record", "unavailable")
+    now = datetime.now(UTC)
+    try:
+        check = AdultEligibilityCheck(
+            id=uuid4(),
+            patient_id=patient_id,
+            facility_id=facility_id,
+            method=method,
+            result=result,
+            checked_at=now,
+            checked_by=context.user.id,
+            evidence_id=evidence_id,
+            sequence=1,
+        )
+        db.session.add(check)
+        _record_patient_audit(
+            context=context,
+            permission="eligibility.record",
+            action="eligibility.record",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"result": result, "method": method[:64]},
+        )
+        db.session.flush()
+        response_data = _eligibility_projection(check)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return _error("conflict", "The eligibility check already exists.", 409)
+    except SQLAlchemyError as error:
+        db.session.rollback()
+        if current_app.testing:
+            print("DEBUG eligibility error:", error)
+        return _service_unavailable()
+    except Exception:
+        db.session.rollback()
+        if current_app.testing:
+            import traceback
+
+            traceback.print_exc()
+        return _service_unavailable()
+    return jsonify(data=response_data), 201
+
+
+@blueprint.get("/consent-notices")
+@require_permission("consent.read")
+def list_consent_notices() -> tuple[Response, int]:
+    context = get_access_context()
+    purpose = request.args.get("purpose")
+    language = request.args.get("language")
+    query = select(ConsentNoticeVersion).where(ConsentNoticeVersion.status == "approved")
+    if purpose:
+        query = query.where(ConsentNoticeVersion.purpose_codes.contains([purpose]))
+    if language is not None:
+        query = query.where(ConsentNoticeVersion.language == language)
+    notices = list(
+        db.session.scalars(
+            query.order_by(ConsentNoticeVersion.notice_code, ConsentNoticeVersion.revision)
+        ).all()
+    )
+    data = [
+        {
+            "id": str(notice.id),
+            "notice_code": notice.notice_code,
+            "revision": notice.revision,
+            "language": notice.language,
+            "status": notice.status,
+            "purpose_codes": notice.purpose_codes,
+            "effective_from": notice.effective_from.isoformat() if notice.effective_from else None,
+            "effective_to": notice.effective_to.isoformat() if notice.effective_to else None,
+            "version": notice.version,
+        }
+        for notice in notices
+    ]
+    try:
+        _record_patient_audit(
+            context=context,
+            permission="consent.read",
+            action="consent.notice.list",
+            facility_id=None,
+            patient_id=None,
+            metadata={"purpose": purpose, "language": language},
+        )
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(data=data, page={"next_cursor": None}), 200
+
+
+def _consent_event_projection(event: ConsentEvent) -> dict[str, object]:
+    return {
+        "id": str(event.id),
+        "patient_id": str(event.patient_id),
+        "facility_id": str(event.facility_id),
+        "episode_id": str(event.episode_id) if event.episode_id else None,
+        "notice_version_id": str(event.notice_version_id) if event.notice_version_id else None,
+        "purpose": event.purpose,
+        "decision": event.decision,
+        "method": event.method,
+        "language": event.language,
+        "effective_at": event.effective_at.isoformat(),
+        "recorded_by": str(event.recorded_by),
+        "evidence_id": str(event.evidence_id) if event.evidence_id else None,
+        "supersedes_id": str(event.supersedes_id) if event.supersedes_id else None,
+        "event_sequence": event.event_sequence,
+        "version": event.version,
+    }
+
+
+@blueprint.get("/<uuid:patient_id>/consent-events")
+@require_permission("consent.read")
+def list_consent_events(patient_id: UUID) -> tuple[Response, int]:
+    context = get_access_context()
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    purpose = request.args.get("purpose")
+    if facility_id is None:
+        return _error("validation_failed", "A valid facility context is required.", 422)
+    if not facility_scope_allows(context, facility_id, "consent.read"):
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "consent.read", "unavailable")
+    query = select(ConsentEvent).where(
+        ConsentEvent.patient_id == patient_id, ConsentEvent.facility_id == facility_id
+    )
+    if purpose:
+        query = query.where(ConsentEvent.purpose == purpose)
+    events = list(db.session.scalars(query.order_by(ConsentEvent.event_sequence.desc())).all())
+    data = [_consent_event_projection(event) for event in events]
+    try:
+        _record_patient_audit(
+            context=context,
+            permission="consent.read",
+            action="consent.event.list",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"purpose": purpose},
+        )
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(data=data, page={"next_cursor": None}), 200
+
+
+@blueprint.post("/<uuid:patient_id>/consent-events")
+@require_permission("consent.record")
+def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
+    context = get_access_context()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error("validation_failed", "A JSON request body is required.", 422)
+    if set(payload) - {
+        "episode_id",
+        "purpose",
+        "decision",
+        "notice_version_id",
+        "method",
+        "language",
+        "evidence_id",
+        "supersedes_id",
+    }:
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    purpose = payload.get("purpose")
+    decision = payload.get("decision")
+    notice_version_id = _parse_uuid(payload.get("notice_version_id"))
+    method = payload.get("method")
+    language = payload.get("language")
+    evidence_id = _parse_uuid(payload.get("evidence_id"))
+    supersedes_id = _parse_uuid(payload.get("supersedes_id"))
+    if (
+        facility_id is None
+        or not isinstance(purpose, str)
+        or not isinstance(decision, str)
+        or decision not in {"grant", "withdraw", "correct"}
+        or not isinstance(method, str)
+        or not isinstance(language, str)
+        or language not in {"en", "lg"}
+    ):
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    if not facility_scope_allows(context, facility_id, "consent.record"):
+        return _deny_patient_access(context, "consent.record", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "consent.record", "facility_scope")
+    if decision == "withdraw" and not (
+        context.permissions and "consent.withdraw" in context.permissions
+    ):
+        return _deny_patient_access(context, "consent.withdraw", "permission")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "consent.record", "unavailable")
+    max_sequence = db.session.scalar(
+        select(sa.func.max(ConsentEvent.event_sequence)).where(
+            ConsentEvent.patient_id == patient_id,
+            ConsentEvent.facility_id == facility_id,
+        )
+    )
+    next_sequence = (max_sequence or 0) + 1
+    now = datetime.now(UTC)
+    try:
+        event = ConsentEvent(
+            id=uuid4(),
+            patient_id=patient_id,
+            facility_id=facility_id,
+            episode_id=None,
+            notice_version_id=notice_version_id,
+            purpose=purpose,
+            decision=decision,
+            method=method,
+            language=language,
+            effective_at=now,
+            recorded_by=context.user.id,
+            evidence_id=evidence_id,
+            supersedes_id=supersedes_id,
+            event_sequence=next_sequence,
+        )
+        db.session.add(event)
+        _record_patient_audit(
+            context=context,
+            permission="consent.record",
+            action=f"consent.{decision}",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"purpose": purpose, "decision": decision, "method": method[:64]},
+        )
+        db.session.flush()
+        response_data = _consent_event_projection(event)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return _error("conflict", "The consent event could not be recorded.", 409)
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(data=response_data), 201
+
+
+@blueprint.get("/<uuid:patient_id>/evidence/<uuid:evidence_id>")
+@require_permission("consent.read")
+def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
+    context = get_access_context()
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    if facility_id is None:
+        return _error("validation_failed", "A valid facility context is required.", 422)
+    if not facility_scope_allows(context, facility_id, "consent.read"):
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "consent.read", "facility_scope")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "consent.read", "unavailable")
+    evidence = db.session.scalar(
+        select(ProtectedEvidence).where(
+            ProtectedEvidence.id == evidence_id,
+            ProtectedEvidence.facility_id == facility_id,
+        )
+    )
+    if evidence is None:
+        return _deny_patient_access(context, "consent.read", "unavailable")
+    try:
+        _record_patient_audit(
+            context=context,
+            permission="consent.read",
+            action="evidence.access",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"evidence_id": str(evidence_id)},
+        )
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(
+        {
+            "id": str(evidence.id),
+            "facility_id": str(evidence.facility_id),
+            "storage_reference": evidence.storage_reference,
+            "media_type": evidence.media_type,
+            "recorded_by": str(evidence.recorded_by),
+            "version": evidence.version,
+        }
+    ), 200

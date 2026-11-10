@@ -20,7 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tunza.extensions import db
@@ -243,11 +243,200 @@ class ParticipantAssignment(db.Model):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
 
+class ProtectedEvidence(db.Model):
+    __tablename__ = "protected_evidence"
+    __table_args__ = (
+        UniqueConstraint("id", "facility_id", name="uq_protected_evidence_id_facility"),
+        {"implicit_returning": False},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    facility_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "facilities.id",
+            ondelete="RESTRICT",
+            name="fk_protected_evidence_facility_id_facilities",
+        ),
+        nullable=False,
+        index=True,
+    )
+    storage_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    recorded_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="RESTRICT", name="fk_protected_evidence_recorded_by_users"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AdultEligibilityCheck(db.Model):
+    __tablename__ = "adult_eligibility_checks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["patient_id", "facility_id"],
+            ["facility_patient_profiles.patient_id", "facility_patient_profiles.facility_id"],
+            name="fk_adult_eligibility_patient_facility_profiles",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["evidence_id", "facility_id"],
+            ["protected_evidence.id", "protected_evidence.facility_id"],
+            name="fk_adult_eligibility_evidence_protected_evidence",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "patient_id",
+            "facility_id",
+            "sequence",
+            name="uq_adult_eligibility_patient_facility_sequence",
+        ),
+        CheckConstraint(
+            "result IN ('verified', 'uncertain', 'ineligible')",
+            name="ck_adult_eligibility_result_values",
+        ),
+        CheckConstraint("sequence > 0", name="ck_adult_eligibility_sequence_positive"),
+        CheckConstraint("version > 0", name="ck_adult_eligibility_version_positive"),
+        {"implicit_returning": False},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    facility_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    method: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checked_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="RESTRICT", name="fk_adult_eligibility_checked_by_users"),
+        nullable=False,
+    )
+    evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
+
+class ConsentNoticeVersion(db.Model):
+    __tablename__ = "consent_notice_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "notice_code",
+            "revision",
+            "language",
+            name="uq_consent_notice_version_code_revision_language",
+        ),
+        CheckConstraint(
+            "language IN ('en', 'lg')",
+            name="ck_consent_notice_version_language_values",
+        ),
+        CheckConstraint(
+            "status IN ('approved', 'rejected', 'superseded')",
+            name="ck_consent_notice_version_status_values",
+        ),
+        CheckConstraint("version > 0", name="ck_consent_notice_version_version_positive"),
+        {"implicit_returning": False},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    notice_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    language: Mapped[str] = mapped_column(String(2), nullable=False)
+    text_cipher: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    purpose_codes: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), nullable=False, server_default="{}"
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="approved")
+    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
+
+class ConsentEvent(db.Model):
+    __tablename__ = "consent_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["patient_id", "facility_id"],
+            ["facility_patient_profiles.patient_id", "facility_patient_profiles.facility_id"],
+            name="fk_consent_event_patient_facility_profiles",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["episode_id", "patient_id"],
+            ["pregnancy_episodes.id", "pregnancy_episodes.patient_id"],
+            name="fk_consent_event_episode_patient",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["notice_version_id"],
+            ["consent_notice_versions.id"],
+            name="fk_consent_event_notice_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["evidence_id", "facility_id"],
+            ["protected_evidence.id", "protected_evidence.facility_id"],
+            name="fk_consent_event_evidence_protected_evidence",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_id"],
+            ["consent_events.id"],
+            name="fk_consent_event_supersedes_consent_event",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "decision IN ('grant', 'withdraw', 'correct')",
+            name="ck_consent_event_decision_values",
+        ),
+        CheckConstraint(
+            "language IN ('en', 'lg')",
+            name="ck_consent_event_language_values",
+        ),
+        CheckConstraint("event_sequence > 0", name="ck_consent_event_sequence_positive"),
+        CheckConstraint("version > 0", name="ck_consent_event_version_positive"),
+        {"implicit_returning": False},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    facility_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    episode_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    notice_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    purpose: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    method: Mapped[str] = mapped_column(String(64), nullable=False)
+    language: Mapped[str] = mapped_column(String(2), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="RESTRICT", name="fk_consent_event_recorded_by_users"),
+        nullable=False,
+    )
+    evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
+
 __all__ = [
+    "AdultEligibilityCheck",
     "CommunicationPreference",
+    "ConsentEvent",
+    "ConsentNoticeVersion",
     "EpisodeFacilityAssignment",
     "FacilityPatientProfile",
     "ParticipantAssignment",
     "Patient",
     "PregnancyEpisode",
+    "ProtectedEvidence",
 ]

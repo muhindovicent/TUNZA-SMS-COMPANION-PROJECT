@@ -56,12 +56,15 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0005_patient_idempotency"
+                assert revision == "0006_patient_eligibility_consent"
             expected_tables = {
                 "alembic_version",
                 "audit_events",
                 "auth_sessions",
                 "communication_preferences",
+                "consent_events",
+                "consent_notice_versions",
+                "adult_eligibility_checks",
                 "episode_facility_assignments",
                 "facilities",
                 "facility_memberships",
@@ -71,6 +74,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 "patients",
                 "permissions",
                 "pregnancy_episodes",
+                "protected_evidence",
                 "role_bindings",
                 "role_permissions",
                 "roles",

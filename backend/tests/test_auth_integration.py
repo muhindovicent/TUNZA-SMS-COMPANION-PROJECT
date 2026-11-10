@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
@@ -848,3 +849,166 @@ def test_scope_mismatched_bindings_are_excluded_and_fail_closed(client, identity
         assert (
             facility_scope_allows(context, identity.facility_ids["TST-A"], "facility.read") is False
         )
+
+
+def _register_synthetic_patient(client, facility_id, reference_suffix="TEST"):
+    """Register a synthetic patient and return patient_id."""
+    key = str(uuid4())
+    payload = {
+        "facility_id": facility_id,
+        "local_reference": f"SYN-ADULT-ELIG-{reference_suffix}",
+        "demographics": {},
+        "language": "en",
+    }
+    response = client.post(
+        "/api/v1/patients",
+        json=payload,
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response.status_code == 201, response.json
+    return response.json["data"]["patient"]["id"]
+
+
+def test_eligibility_record_defaults_to_ineligible(client, identity):
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "elig-default")
+
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+        json={
+            "method": "documentary",
+            "result": "uncertain",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 201, response.json
+    assert response.json["data"]["result"] == "uncertain"
+
+    with identity.app.app_context():
+        event_count = db.session.execute(
+            sa.select(sa.func.count())
+            .select_from(sa.text("audit_events"))
+            .where(sa.text("action = 'eligibility.record'"))
+        ).scalar_one()
+        assert event_count >= 1
+
+
+def test_eligibility_rejects_unassigned_staff(client, identity):
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "elig-unassigned")
+
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+
+    response = client_b.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+        json={
+            "method": "documentary",
+            "result": "verified",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 404
+
+
+def test_consent_grant_withdraw_and_history(client, identity):
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "consent-flow")
+
+    grant_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert grant_response.status_code == 201, grant_response.json
+    assert grant_response.json["data"]["decision"] == "grant"
+    assert grant_response.json["data"]["purpose"] == "messaging"
+
+    withdraw_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "withdraw",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert withdraw_response.status_code == 201, withdraw_response.json
+    assert withdraw_response.json["data"]["decision"] == "withdraw"
+
+    events_response = client.get(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert events_response.status_code == 200
+    events = events_response.json["data"]
+    assert len(events) >= 2
+    decisions = {event["decision"] for event in events}
+    assert "grant" in decisions
+    assert "withdraw" in decisions
+
+
+def test_cross_facility_consent_denied(client, identity):
+    _login(client, "tst.vht.a")
+    facility_a = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_a, "cross-facility")
+
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+
+    response = client_b.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_a}",
+        json={
+            "method": "documentary",
+            "result": "verified",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 404
+
+
+def test_consent_audit_failure_rolls_back(client, identity, monkeypatch):
+    import tunza.patients.routes as patient_routes
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "audit-fail")
+
+    def fail_audit(**_kwargs):
+        raise SQLAlchemyError("synthetic audit failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(patient_routes, "_record_patient_audit", fail_audit)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+            json={
+                "method": "documentary",
+                "result": "verified",
+                "checked_at": "2026-01-15T10:00:00Z",
+            },
+            headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+        )
+        assert response.status_code == 503
+
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+        json={
+            "method": "documentary",
+            "result": "verified",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 201, response.json
