@@ -143,7 +143,7 @@ def _record_patient_audit(
     )
 
 
-def _deny_facility_scope(context, permission: str, facility_id: UUID) -> tuple[Response, int]:
+def _deny_patient_access(context, permission: str, reason: str) -> tuple[Response, int]:
     try:
         record_audit(
             permission=permission,
@@ -153,7 +153,7 @@ def _deny_facility_scope(context, permission: str, facility_id: UUID) -> tuple[R
             request_id=g.request_id,
             actor_id=context.user.id,
             facility_id=None,
-            metadata={"reason": "facility_scope"},
+            metadata={"reason": reason},
         )
         db.session.commit()
     except SQLAlchemyError:
@@ -189,10 +189,10 @@ def register_patient() -> tuple[Response, int]:
     if not SYNTHETIC_REFERENCE.fullmatch(local_reference) or language not in ALLOWED_LANGUAGES:
         return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
     if not facility_scope_allows(context, facility_id, "patient.register"):
-        return _deny_facility_scope(context, "patient.register", facility_id)
+        return _deny_patient_access(context, "patient.register", "facility_scope")
     membership = _active_membership(context, facility_id)
     if membership is None:
-        return _deny_facility_scope(context, "patient.register", facility_id)
+        return _deny_patient_access(context, "patient.register", "facility_scope")
 
     establish_patient_context(context, facility_id)
     now = datetime.now(UTC)
@@ -232,24 +232,26 @@ def register_patient() -> tuple[Response, int]:
         duty="primary",
         valid_from=now,
     )
-    db.session.add_all(
-        [
+    try:
+        # These models have no ORM relationships, so order the FK-dependent
+        # inserts explicitly while retaining a single atomic transaction.
+        for row in (
             patient,
             profile,
             preference,
             episode,
             facility_assignment,
             participant_assignment,
-        ]
-    )
-    _record_patient_audit(
-        context=context,
-        permission="patient.register",
-        action="patient.register",
-        facility_id=facility_id,
-        patient_id=patient.id,
-    )
-    try:
+        ):
+            db.session.add(row)
+            db.session.flush()
+        _record_patient_audit(
+            context=context,
+            permission="patient.register",
+            action="patient.register",
+            facility_id=facility_id,
+            patient_id=patient.id,
+        )
         db.session.flush()
         response_data = {
             "patient": _patient_projection(profile, preference),
@@ -300,7 +302,7 @@ def search_patients() -> tuple[Response, int]:
     if not SYNTHETIC_REFERENCE.fullmatch(local_reference):
         return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
     if not facility_scope_allows(context, facility_id, "patient.read"):
-        return _deny_facility_scope(context, "patient.read", facility_id)
+        return _deny_patient_access(context, "patient.read", "facility_scope")
 
     establish_patient_context(context, facility_id)
     profiles = list(
@@ -348,7 +350,7 @@ def patient_detail(patient_id: UUID) -> tuple[Response, int]:
     if facility_id is None:
         return _error("validation_failed", "A valid facility context is required.", 422)
     if not facility_scope_allows(context, facility_id, "patient.read"):
-        return _deny_facility_scope(context, "patient.read", facility_id)
+        return _deny_patient_access(context, "patient.read", "facility_scope")
 
     establish_patient_context(context, facility_id)
     profile = db.session.scalar(
@@ -357,7 +359,7 @@ def patient_detail(patient_id: UUID) -> tuple[Response, int]:
         )
     )
     if profile is None:
-        return _error("not_found", "The request could not be completed.", 404)
+        return _deny_patient_access(context, "patient.read", "unavailable")
     preference = db.session.scalar(
         select(CommunicationPreference).where(
             CommunicationPreference.patient_id == patient_id,
@@ -365,7 +367,7 @@ def patient_detail(patient_id: UUID) -> tuple[Response, int]:
         )
     )
     if preference is None:
-        return _error("not_found", "The request could not be completed.", 404)
+        return _deny_patient_access(context, "patient.read", "unavailable")
     data = _patient_projection(profile, preference)
     version = profile.version
     try:

@@ -28,6 +28,7 @@ from tunza.extensions import db
 
 class Patient(db.Model):
     __tablename__ = "patients"
+    __table_args__ = {"implicit_returning": False}
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     created_at: Mapped[datetime] = mapped_column(
@@ -111,6 +112,7 @@ class PregnancyEpisode(db.Model):
             name="communication_state_values",
         ),
         CheckConstraint("version > 0", name="version_positive"),
+        {"implicit_returning": False},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

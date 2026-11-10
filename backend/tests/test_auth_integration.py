@@ -245,6 +245,46 @@ def _session_record(token: str) -> AuthSession | None:
     )
 
 
+def test_synthetic_patient_registration_and_read(client, identity):
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    response = client.post(
+        "/api/v1/patients",
+        json={
+            "facility_id": facility_id,
+            "local_reference": "SYN-ADULT-REGISTRY-TEST",
+            "demographics": {},
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 201, response.json
+    patient_id = response.json["data"]["patient"]["id"]
+    detail = client.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
+    assert detail.status_code == 200
+    assert detail.json["data"]["id"] == patient_id
+
+    other_staff = identity.app.test_client()
+    _login(other_staff, "tst.revocable")
+    denied = other_staff.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
+    assert denied.status_code == 404
+    other_facility = identity.app.test_client()
+    _login(other_facility, "tst.vht.b")
+    denied = other_facility.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
+    assert denied.status_code == 404
+    with identity.app.app_context():
+        events = db.session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == "patient.access", AuditEvent.outcome == "denied"
+            )
+        ).all()
+        assert {event.event_metadata.get("reason") for event in events} >= {
+            "unavailable",
+            "facility_scope",
+        }
+        assert all(event.resource_id is None and event.facility_id is None for event in events)
+
+
 def test_login_success_returns_session_cookie_and_identity(client, identity):
     response = _login(client, "tst.vht.a")
     assert response.json["data"] == {
