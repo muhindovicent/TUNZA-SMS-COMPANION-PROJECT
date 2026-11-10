@@ -54,7 +54,7 @@ python -m pytest --cov=tunza --cov-report=term-missing
 
 An additional inline smoke check calls the existing Flask liveness/readiness endpoints and requires HTTP 200 plus a connected database status. Readiness executes the actual SQLAlchemy `SELECT 1` check; it is not mocked.
 
-The full backend suite runs with `TEST_DATABASE_URL` and `TEST_MIGRATION_DATABASE_URL` set. The PostgreSQL integration tests therefore run rather than taking their local no-database skip path. The migration round-trip verifies idempotent upgrade, Alembic head, metadata consistency, downgrade/re-upgrade, and real database readiness; the authentication integration suite exercises login, sessions, CSRF, rate limiting, RBAC, facility isolation, and the append-only audit trigger against the same disposable database, then drops back to base so the migration test still sees an empty database. Loopback/test-name/same-database guards remain intact.
+The backend suite uses `TEST_DATABASE_URL` for the direct non-owner `tunza_runtime` login and `TEST_MIGRATION_DATABASE_URL` for the distinct disposable migration owner. Tests verify both PostgreSQL session identities, role attributes, ownership and schema privileges, rejection of privileged logins and role memberships, populated RLS isolation and pooled context cleanup, as well as migration round trips, authentication, CSRF and audit behavior. The two credentials target the same dedicated loopback test database. The CI service uses trust authentication only within its disposable service.
 
 ## Disposable database and synthetic configuration
 

@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import inspect, select, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from tunza import create_app
 from tunza.access import accessible_facility_ids, facility_scope_allows, load_access_context
@@ -45,13 +47,25 @@ def identity_app():
         or not url.database.endswith("_test")
     ):
         pytest.fail("Integration tests require a dedicated local tunza_*_test database.")
+    migration_value = os.environ.get("TEST_MIGRATION_DATABASE_URL")
+    if not migration_value:
+        pytest.fail("Set TEST_MIGRATION_DATABASE_URL to the separate disposable owner login.")
+    migration_url = postgres_url(migration_value, "TEST_MIGRATION_DATABASE_URL")
+    if (migration_url.host, migration_url.port, migration_url.database) != (
+        url.host,
+        url.port,
+        url.database,
+    ) or migration_url.username == url.username:
+        pytest.fail(
+            "Test runtime and migration users must be distinct and target the same database."
+        )
 
     application = create_app(
         {
             "APP_ENV": "testing",
             "SECRET_KEY": secrets.token_urlsafe(48),
             "DATABASE_URL": value,
-            "MIGRATION_DATABASE_URL": value,
+            "MIGRATION_DATABASE_URL": migration_value,
             "SESSION_COOKIE_SECURE": False,
         }
     )
@@ -243,6 +257,236 @@ def _session_record(token: str) -> AuthSession | None:
     return db.session.scalar(
         select(AuthSession).where(AuthSession.token_hash == hash_session_token(token))
     )
+
+
+def test_synthetic_patient_registration_and_read(client, identity):
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    payload = {
+        "facility_id": facility_id,
+        "local_reference": "SYN-ADULT-REGISTRY-TEST",
+        "demographics": {},
+        "language": "en",
+    }
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())}
+    response = client.post("/api/v1/patients", json=payload, headers=headers)
+    assert response.status_code == 201, response.json
+    replay = client.post("/api/v1/patients", json=payload, headers=headers)
+    assert replay.status_code == 201
+    assert replay.json == response.json
+    conflict = client.post("/api/v1/patients", json={**payload, "language": "lg"}, headers=headers)
+    assert conflict.status_code == 409
+    patient_id = response.json["data"]["patient"]["id"]
+    detail = client.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
+    assert detail.status_code == 200
+    assert detail.json["data"]["id"] == patient_id
+    runtime_url = postgres_url(os.environ["TEST_DATABASE_URL"])
+    runtime = create_engine(runtime_url, pool_size=1, max_overflow=0)
+    try:
+        with runtime.connect() as connection:
+            assert connection.execute(text("SELECT session_user")).scalar_one() == "tunza_runtime"
+            assert not connection.execute(
+                text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            ).scalar_one()
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 0
+            )
+            connection.execute(
+                text(
+                    "SELECT set_config('tunza.actor_id', :actor, true), "
+                    "set_config('tunza.facility_id', :facility, true)"
+                ),
+                {"actor": str(identity.user_ids["vht_a"]), "facility": facility_id},
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 1
+            )
+            connection.execute(
+                text("SELECT set_config('tunza.facility_id', :facility, true)"),
+                {"facility": str(identity.facility_ids["TST-B"])},
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 0
+            )
+        with runtime.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 0
+            )
+    finally:
+        runtime.dispose()
+    with identity.app.app_context():
+        with db.engine.connect() as connection:
+            assert connection.execute(text("SELECT current_user")).scalar_one() == "tunza_runtime"
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 0
+            )
+            connection.execute(
+                text(
+                    "SELECT set_config('tunza.actor_id', :actor, true), "
+                    "set_config('tunza.facility_id', :facility, true)"
+                ),
+                {"actor": str(identity.user_ids["vht_a"]), "facility": facility_id},
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 1
+            )
+            connection.execute(
+                text("SELECT set_config('tunza.facility_id', :facility, true)"),
+                {"facility": str(identity.facility_ids["TST-B"])},
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 0
+            )
+        with db.engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": patient_id},
+                ).scalar_one()
+                == 0
+            )
+
+    other_staff = identity.app.test_client()
+    _login(other_staff, "tst.revocable")
+    denied = other_staff.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
+    assert denied.status_code == 404
+    other_facility = identity.app.test_client()
+    _login(other_facility, "tst.vht.b")
+    denied = other_facility.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
+    assert denied.status_code == 404
+    with identity.app.app_context():
+        events = db.session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == "patient.access", AuditEvent.outcome == "denied"
+            )
+        ).all()
+        assert {event.event_metadata.get("reason") for event in events} >= {
+            "unavailable",
+            "facility_scope",
+        }
+        assert all(event.resource_id is None and event.facility_id is None for event in events)
+
+
+def test_concurrent_synthetic_registration_retries(identity):
+    clients = [identity.app.test_client(), identity.app.test_client()]
+    for client in clients:
+        _login(client, "tst.vht.a")
+    csrf = [_csrf(client) for client in clients]
+    key = str(uuid4())
+    payload = {
+        "facility_id": str(identity.facility_ids["TST-A"]),
+        "local_reference": "SYN-ADULT-CONCURRENT-TEST",
+        "demographics": {},
+        "language": "en",
+    }
+    barrier = Barrier(2)
+
+    def submit(index):
+        barrier.wait(timeout=10)
+        response = clients[index].post(
+            "/api/v1/patients",
+            json=payload,
+            headers={"X-CSRF-Token": csrf[index], "Idempotency-Key": key},
+        )
+        return response.status_code, response.json
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, range(2)))
+    assert [result[0] for result in results] == [201, 201]
+    assert results[0][1] == results[1][1]
+
+
+def test_patient_audit_failure_rolls_back_and_suppresses_response(client, identity, monkeypatch):
+    import tunza.patients.routes as patient_routes
+
+    _login(client, "tst.vht.a")
+    facility = str(identity.facility_ids["TST-A"])
+    payload = {
+        "facility_id": facility,
+        "local_reference": "SYN-ADULT-AUDIT-TEST",
+        "demographics": {},
+        "language": "en",
+    }
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())}
+
+    def fail_audit(**_kwargs):
+        raise SQLAlchemyError("synthetic audit failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(patient_routes, "_record_patient_audit", fail_audit)
+        assert client.post("/api/v1/patients", json=payload, headers=headers).status_code == 503
+    created = client.post("/api/v1/patients", json=payload, headers=headers)
+    assert created.status_code == 201
+    patient_id = created.json["data"]["patient"]["id"]
+    with monkeypatch.context() as patch:
+        patch.setattr(patient_routes, "_record_patient_audit", fail_audit)
+        response = client.get(f"/api/v1/patients/{patient_id}?facility_id={facility}")
+        assert response.status_code == 503
+        assert "data" not in response.json
+
+
+def test_expired_patient_assignment_denies_detail_and_replay(client, identity):
+    _login(client, "tst.vht.a")
+    facility = str(identity.facility_ids["TST-A"])
+    payload = {
+        "facility_id": facility,
+        "local_reference": "SYN-ADULT-EXPIRY-TEST",
+        "demographics": {},
+        "language": "en",
+    }
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())}
+    response = client.post("/api/v1/patients", json=payload, headers=headers)
+    assert response.status_code == 201
+    data = response.json["data"]
+    owner = create_engine(
+        postgres_url(
+            os.environ.get("TEST_MIGRATION_DATABASE_URL") or os.environ["TEST_DATABASE_URL"]
+        )
+    )
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE participant_assignments SET valid_from = now() - interval '2 hours', "
+                    "valid_to = now() - interval '1 hour' WHERE id = :id"
+                ),
+                {"id": data["participant_assignment_id"]},
+            )
+    finally:
+        owner.dispose()
+    assert (
+        client.get(f"/api/v1/patients/{data['patient']['id']}?facility_id={facility}").status_code
+        == 404
+    )
+    assert client.post("/api/v1/patients", json=payload, headers=headers).status_code == 404
 
 
 def test_login_success_returns_session_cookie_and_identity(client, identity):
@@ -491,13 +735,13 @@ def test_audit_events_reject_updates_and_deletes(client, identity):
             select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(1)
         )
         assert event is not None
-        with pytest.raises(DBAPIError, match="append-only"):
+        with pytest.raises(DBAPIError, match="permission denied|append-only"):
             db.session.execute(
                 text("UPDATE audit_events SET outcome = 'success' WHERE id = :event_id"),
                 {"event_id": event.id},
             )
         db.session.rollback()
-        with pytest.raises(DBAPIError, match="append-only"):
+        with pytest.raises(DBAPIError, match="permission denied|append-only"):
             db.session.execute(
                 text("DELETE FROM audit_events WHERE id = :event_id"),
                 {"event_id": event.id},

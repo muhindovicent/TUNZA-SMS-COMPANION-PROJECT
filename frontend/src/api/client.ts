@@ -16,6 +16,7 @@ export interface ApiRequest {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   body?: unknown
   signal?: AbortSignal
+  idempotencyKey?: string
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -70,6 +71,7 @@ export async function fetchCsrfToken(signal?: AbortSignal): Promise<string> {
 export async function apiFetch<T>(path: string, request: ApiRequest = {}): Promise<T> {
   const method = request.method ?? 'GET'
   const headers: Record<string, string> = { Accept: 'application/json' }
+  if (request.idempotencyKey) headers['Idempotency-Key'] = request.idempotencyKey
   let payload: string | undefined
   if (request.body !== undefined) {
     headers['Content-Type'] = 'application/json'

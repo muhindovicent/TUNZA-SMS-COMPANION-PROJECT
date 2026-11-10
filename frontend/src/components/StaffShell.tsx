@@ -6,13 +6,14 @@ import type { StaffIdentity } from '../api/auth'
 import { hasAdminPermission } from '../api/admin'
 import AdminPanel from './AdminPanel'
 import BrandMark from './BrandMark'
+import PatientRegistry from './PatientRegistry'
 
 interface StaffShellProps {
   identity: StaffIdentity
   onSignedOut: () => void
 }
 
-type ShellView = 'overview' | 'admin'
+type ShellView = 'overview' | 'admin' | 'patients'
 
 function ConnectionCard({
   title,
@@ -61,6 +62,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
   const [signOutError, setSignOutError] = useState<string | null>(null)
   const [view, setView] = useState<ShellView>('overview')
   const showAdmin = hasAdminPermission(identity.permissions)
+  const showPatients = identity.permissions.some((permission) =>
+    ['patient.read', 'patient.register'].includes(permission),
+  )
 
   useEffect(() => {
     const controller = new AbortController()
@@ -125,6 +129,10 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
               Administration
             </button>
           ) : null}
+          {showPatients ? (
+            <button type="button" className={view === 'patients' ? 'nav-link is-active' : 'nav-link'}
+              onClick={() => setView('patients')}>Patient registry</button>
+          ) : null}
         </nav>
         <div className="user-cluster">
           <span className="user-summary">
@@ -159,7 +167,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
       </header>
 
       <main id="main-content">
-        {view === 'admin' && showAdmin ? (
+        {view === 'patients' && showPatients ? (
+          <PatientRegistry identity={identity} />
+        ) : view === 'admin' && showAdmin ? (
           <AdminPanel identity={identity} />
         ) : (
           <>
@@ -178,9 +188,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
             considered step at a time.
           </p>
           <div className="hero-meta">
-            <span>Phase 1B-2</span>
+            <span>Phase 2A-1</span>
             <span className="meta-divider" />
-            Staff administration and facility access
+            Synthetic patient registry foundation
           </div>
         </section>
 
@@ -232,9 +242,8 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
             <p className="section-kicker">A focused next step</p>
             <h2 id="scope-title">Secure sign-in first. Care, thoughtfully next.</h2>
             <p>
-              This milestone establishes staff login, server-side sessions, role-based permissions
-              and facility-scoped access. Patient records, staff dashboards and SMS workflows belong
-              to later milestones.
+              Staff with the appropriate permissions can register and find assigned synthetic
+              patient records within their facility.
             </p>
             <span className="synthetic-label">Synthetic development data only</span>
           </div>
@@ -247,7 +256,7 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
         <span>
           <strong>TUNZA</strong> · A Zest Technologies project
         </span>
-        <span>Phase 1B-2 · Local development</span>
+        <span>Phase 2A-1 · Local development</span>
       </footer>
     </div>
   )

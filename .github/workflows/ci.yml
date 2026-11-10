@@ -67,9 +67,9 @@ jobs:
     env:
       APP_ENV: testing
       FLASK_SKIP_DOTENV: '1'
-      DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+      DATABASE_URL: postgresql+psycopg://tunza_runtime@127.0.0.1:5432/tunza_ci_test
       MIGRATION_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
-      TEST_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+      TEST_DATABASE_URL: postgresql+psycopg://tunza_runtime@127.0.0.1:5432/tunza_ci_test
       TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
     services:
       postgres:
