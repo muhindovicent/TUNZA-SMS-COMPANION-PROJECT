@@ -942,13 +942,13 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             separators=(",", ":"),
         ).encode()
     ).digest()
-    # Idempotency: bind to patient + actor + facility + request fingerprint
+    # Idempotency: bind to patient + recorded_by (actor) + facility + request fingerprint
     existing = db.session.scalar(
         select(ConsentEvent).where(
             ConsentEvent.patient_id == patient_id,
             ConsentEvent.facility_id == facility_id,
             ConsentEvent.idempotency_key == idempotency_key,
-            ConsentEvent.actor_id == context.user.id,
+            ConsentEvent.recorded_by == context.user.id,
         )
     )
     if existing is not None:
@@ -1096,6 +1096,13 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
         db.session.scalars(
             select(ProtectedEvidence).where(
                 ProtectedEvidence.facility_id == facility_id,
+                ProtectedEvidence.id.in_(
+                    select(ConsentEvent.evidence_id).where(
+                        ConsentEvent.patient_id == patient_id,
+                        ConsentEvent.facility_id == facility_id,
+                        ConsentEvent.evidence_id.is_not(None),
+                    )
+                ),
             )
         ).all()
     )
@@ -1115,9 +1122,7 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
         data=[
             {
                 "id": str(evidence.id),
-                "storage_reference": evidence.storage_reference,
                 "media_type": evidence.media_type,
-                "recorded_by": str(evidence.recorded_by),
                 "version": evidence.version,
             }
             for evidence in evidence_rows

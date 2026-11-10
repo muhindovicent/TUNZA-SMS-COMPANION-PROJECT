@@ -28,9 +28,7 @@ interface ConsentNotice {
 
 interface EvidenceReference {
   id: string
-  storage_reference: string
   media_type: string
-  recorded_by: string
   version: number
 }
 
@@ -134,10 +132,10 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
 
   async function loadEvidenceReferences(patientId: string) {
     try {
-      const response = await apiFetch<{ data: EvidenceReference[] }>(`/patients/${encodeURIComponent(patientId)}/evidence?facility_id=${encodeURIComponent(facility)}`, {
+      const response = await apiFetch<EvidenceReference[]>(`/patients/${encodeURIComponent(patientId)}/evidence?facility_id=${encodeURIComponent(facility)}`, {
         method: 'GET',
       })
-      setEvidenceReferences(response.data || [])
+      setEvidenceReferences(response || [])
     } catch {
       setEvidenceReferences([])
     }
@@ -295,7 +293,7 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
                   <option value="">Select evidence</option>
                   {evidenceReferences.map((evidence) => (
                     <option key={evidence.id} value={evidence.id}>
-                      {evidence.storage_reference} ({evidence.media_type})
+                      Evidence {evidence.id.slice(-8)} ({evidence.media_type})
                     </option>
                   ))}
                 </select>

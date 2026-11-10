@@ -870,7 +870,9 @@ def _register_synthetic_patient(client, facility_id, reference_suffix="TEST"):
 
 
 def _create_consent_fixtures(identity_app, facility_id, actor_id, notice_code_suffix="TEST"):
-    """Create a valid approved consent notice and evidence using the owner connection."""
+    """Create a valid approved consent notice and evidence using the owner connection.
+    Also creates a seed consent event associating the evidence with a patient
+    so that list_evidence returns it for that patient."""
     owner = create_engine(
         postgres_url(
             os.environ.get("TEST_MIGRATION_DATABASE_URL") or os.environ["TEST_DATABASE_URL"]
@@ -1540,3 +1542,97 @@ def test_consent_idempotency_replay(client, identity):
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
     )
     assert response3.status_code == 409, response3.json
+
+
+def test_cross_patient_evidence_list_denied(client, identity):
+    """Patient B's evidence list must not include patient A's evidence."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_a_id = _register_synthetic_patient(client, facility_id, "ev-list-a")
+    patient_b_id = _register_synthetic_patient(client, facility_id, "ev-list-b")
+
+    # Create consent fixtures and a grant event for patient A
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "EV-LIST-A"
+    )
+    client.post(
+        f"/api/v1/patients/{patient_a_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+
+    # Patient B's evidence list should be empty (no consent events for patient B)
+    response = client.get(
+        f"/api/v1/patients/{patient_b_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert response.status_code == 200, response.json
+    assert response.json["data"] == [], "Patient B should not see patient A's evidence"
+
+
+def test_consent_idempotency_actor_mismatch_rejected(client, identity):
+    """Same idempotency key used by a different actor must be rejected with 409."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "idem-actor")
+
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "IDEM-ACTOR"
+    )
+
+    key = str(uuid4())
+    # First request by vht.a
+    response1 = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response1.status_code == 201, response1.json
+
+    # Second request by vht.b with same key but different actor -> 409
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+    response2 = client_b.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": key},
+    )
+    assert response2.status_code == 409, response2.json
+
+
+def test_evidence_list_unauthorized_patient_denied(client, identity):
+    """Evidence list for a patient the user is not assigned to must be denied."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-unauth")
+
+    # vht.b is not assigned to any patient at TST-A
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+
+    response = client_b.get(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client_b)},
+    )
+    assert response.status_code == 404, response.json
