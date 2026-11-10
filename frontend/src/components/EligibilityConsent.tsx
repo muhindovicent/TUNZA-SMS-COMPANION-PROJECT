@@ -55,6 +55,10 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
   const [evidenceReferences, setEvidenceReferences] = useState<EvidenceReference[]>([])
   const [selectedNoticeId, setSelectedNoticeId] = useState<string | null>(null)
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null)
+  const [evStorageReference, setEvStorageReference] = useState('')
+  const [evDigest, setEvDigest] = useState('')
+  const [evMediaType, setEvMediaType] = useState('application/pdf')
+  const [evRegistering, setEvRegistering] = useState(false)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState('uncertain')
@@ -67,6 +71,7 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
   const canRecordConsent = identity.permissions.includes('consent.record')
   const canWithdrawConsent = identity.permissions.includes('consent.withdraw')
   const canReadConsent = identity.permissions.includes('consent.read')
+  const canRegisterEvidence = identity.permissions.includes('consent.record')
 
   useEffect(() => {
     apiFetch<ConsentNotice[]>(`/consent-notices?purpose=messaging&language=en&facility_id=${encodeURIComponent(facility)}`, { method: 'GET' })
@@ -81,6 +86,8 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
     setEvidenceReferences([])
     setSelectedNoticeId(null)
     setSelectedEvidenceId(null)
+    setEvStorageReference('')
+    setEvDigest('')
     setMessage('')
     setBusy(true)
     try {
@@ -158,6 +165,41 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
       setMessage('Eligibility check could not be recorded.')
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function registerEvidence(event: FormEvent) {
+    event.preventDefault()
+    if (!patient) return
+    setEvRegistering(true)
+    setMessage('')
+    try {
+      const digestBytes = evDigest.match(/^[0-9a-fA-F]{64}$/)
+        ? evDigest
+        : ''
+      if (!digestBytes) {
+        setMessage('Digest must be a 64-character hex string (SHA-256).')
+        setEvRegistering(false)
+        return
+      }
+      await apiFetch<{ id: string; media_type: string; version: number }>(`/patients/${encodeURIComponent(patient.id)}/evidence?facility_id=${encodeURIComponent(facility)}`, {
+        method: 'POST',
+        body: {
+          storage_reference: evStorageReference,
+          digest: evDigest,
+          media_type: evMediaType,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      })
+      await loadEvidenceReferences(patient.id)
+      setEvStorageReference('')
+      setEvDigest('')
+      setEvMediaType('application/pdf')
+      setMessage('Evidence registered.')
+    } catch {
+      setMessage('Evidence could not be registered.')
+    } finally {
+      setEvRegistering(false)
     }
   }
 
@@ -265,6 +307,31 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
         </section>}
 
         {canRecordConsent && <section>
+          <h3>Consent management</h3>
+          {evidenceReferences.length === 0 && canRegisterEvidence && <section>
+            <h4>Register evidence</h4>
+            <p>No evidence references found for this patient. Register synthetic evidence before granting consent.</p>
+            <form onSubmit={registerEvidence}>
+              <label>Storage reference
+                <input value={evStorageReference} onChange={(event) => setEvStorageReference(event.target.value)}
+                  placeholder="synthetic-evidence-ref" required maxLength={500} />
+              </label>
+              <label>Digest (SHA-256 hex)
+                <input value={evDigest} onChange={(event) => setEvDigest(event.target.value)}
+                  placeholder="64-character hex digest" required maxLength={64} />
+              </label>
+              <label>Media type
+                <select value={evMediaType} onChange={(event) => setEvMediaType(event.target.value)}>
+                  <option value="application/pdf">PDF</option>
+                  <option value="image/png">PNG</option>
+                  <option value="image/jpeg">JPEG</option>
+                </select>
+              </label>
+              <button type="submit" disabled={evRegistering || !evStorageReference || !evDigest || !evMediaType}>
+                {evRegistering ? 'Registering…' : 'Register evidence'}
+              </button>
+            </form>
+          </section>}
           <h3>Consent management</h3>
           <form onSubmit={recordConsent}>
             <label>Purpose

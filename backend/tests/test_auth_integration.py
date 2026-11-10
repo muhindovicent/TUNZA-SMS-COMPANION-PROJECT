@@ -1628,7 +1628,7 @@ def test_consent_idempotency_actor_mismatch_rejected(client, identity):
 
 
 def test_consent_idempotency_different_authorised_actor_rejected(client, identity):
-    """Same idempotency key used by a different authorised actor must be rejected with 409."""
+    """Same idempotency key used by two separately authorised actors must be rejected with 409."""
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "idem-diff-actor")
@@ -1653,18 +1653,45 @@ def test_consent_idempotency_different_authorised_actor_rejected(client, identit
     )
     assert response1.status_code == 201, response1.json
 
-    # Second request by vht.a with same key but different payload -> 409
-    response2 = client.post(
-        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
-        json={
-            "purpose": "messaging",
-            "decision": "withdraw",
-            "method": "documentary",
-            "language": "en",
-        },
-        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
-    )
-    assert response2.status_code == 409, response2.json
+    # Second request by vht.b with same key but different actor -> 409
+    # vht.b is temporarily given facility-scoped membership to TST-A for this test
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+    with identity.app.app_context():
+        from tunza.identity.models import FacilityMembership
+
+        tmp_membership = FacilityMembership(
+            user_id=identity.user_ids["vht_b"],
+            facility_id=facility_id,
+            status="active",
+            starts_at=datetime.now(UTC),
+        )
+        db.session.add(tmp_membership)
+        db.session.commit()
+        tmp_membership_id = tmp_membership.id
+    try:
+        response2 = client_b.post(
+            f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+            json={
+                "purpose": "messaging",
+                "decision": "grant",
+                "notice_version_id": str(notice_id),
+                "method": "documentary",
+                "language": "en",
+                "evidence_id": str(evidence_id),
+            },
+            headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": key},
+        )
+        assert response2.status_code == 409, response2.json
+    finally:
+        with identity.app.app_context():
+            from tunza.identity.models import FacilityMembership
+
+            db.session.execute(
+                sa.text("DELETE FROM facility_memberships WHERE id = :id"),
+                {"id": tmp_membership_id},
+            )
+            db.session.commit()
 
 
 def test_evidence_list_unauthorized_patient_denied(client, identity):
@@ -1694,7 +1721,7 @@ def test_evidence_registration_for_patient(client, identity):
         f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
         json={
             "storage_reference": "synthetic-ref-001",
-            "digest": "synthetic-digest-hex",
+            "digest": "a" * 64,
             "media_type": "application/pdf",
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
@@ -1708,7 +1735,7 @@ def test_evidence_registration_for_patient(client, identity):
         f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
         json={
             "storage_reference": "synthetic-ref-001",
-            "digest": "synthetic-digest-hex",
+            "digest": "a" * 64,
             "media_type": "application/pdf",
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
@@ -1786,7 +1813,7 @@ def test_consent_grant_withdraw_full_flow(client, identity):
         f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
         json={
             "storage_reference": "synthetic-ref-full-flow",
-            "digest": "synthetic-digest-full-flow",
+            "digest": "b" * 64,
             "media_type": "application/pdf",
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
@@ -1860,3 +1887,213 @@ def test_consent_grant_withdraw_full_flow(client, identity):
     decisions = {event["decision"] for event in events}
     assert "grant" in decisions
     assert "withdraw" in decisions
+
+
+def test_rls_cross_patient_direct_query_denied(client, identity):
+    """Direct SQL cross-patient query must be denied by RLS even with facility context."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_a_id = _register_synthetic_patient(client, facility_id, "rls-cross-a")
+    patient_b_id = _register_synthetic_patient(client, facility_id, "rls-cross-b")
+
+    # Register evidence for patient A via API
+    ev_response = client.post(
+        f"/api/v1/patients/{patient_a_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "rls-ref-a",
+            "digest": "c" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert ev_response.status_code == 201
+
+    # Query as patient B's context - should return 0 rows due to RLS
+    with identity.app.app_context():
+        from tunza.access import load_access_context
+        from tunza.identity.models import User
+        from tunza.patients.security import establish_patient_context
+
+        user_b = db.session.get(User, identity.user_ids["vht_a"])
+        context_b = load_access_context(user_b)
+        # Set context for patient B's facility
+        establish_patient_context(context_b, facility_id)
+        # Override patient_id to patient B's ID to simulate cross-patient access
+        db.session.execute(
+            sa.text("SELECT set_config('tunza.patient_id', :pid, true)"),
+            {"pid": str(patient_b_id)},
+        )
+        count = db.session.scalar(
+            sa.text("SELECT count(*) FROM protected_evidence WHERE patient_id = :pid"),
+            {"pid": str(patient_a_id)},
+        )
+        assert count == 0, "RLS should prevent cross-patient evidence access"
+
+
+def test_rls_missing_patient_context_denied(client, identity):
+    """Query without tunza.patient_id context must return no rows (fail closed)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "rls-noctx")
+
+    ev_response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "rls-ref-noctx",
+            "digest": "d" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert ev_response.status_code == 201
+
+    # Query without setting patient_id context - RLS should block
+    with identity.app.app_context():
+        # Don't set tunza.patient_id - only facility_id
+        db.session.execute(
+            sa.text("SELECT set_config('tunza.facility_id', :fid, true)"),
+            {"fid": str(facility_id)},
+        )
+        count = db.session.scalar(sa.text("SELECT count(*) FROM protected_evidence"))
+        assert count == 0, "RLS should deny access without patient context"
+
+
+def test_rls_pooled_connection_no_context_leak(client, identity):
+    """RLS context must not leak across pooled connections."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_a_id = _register_synthetic_patient(client, facility_id, "rls-pool-a")
+    _register_synthetic_patient(client, facility_id, "rls-pool-b")
+
+    # Register evidence for patient A
+    ev_response = client.post(
+        f"/api/v1/patients/{patient_a_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "rls-pool-ref",
+            "digest": "e" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert ev_response.status_code == 201
+
+    # Use a separate connection (simulating pooled connection) without patient context
+    runtime_url = postgres_url(os.environ["TEST_DATABASE_URL"])
+    runtime = create_engine(runtime_url, pool_size=1, max_overflow=0)
+    try:
+        with runtime.connect() as connection:
+            # Only set facility_id, NOT patient_id
+            connection.execute(
+                sa.text("SELECT set_config('tunza.facility_id', :fid, true)"),
+                {"fid": str(facility_id)},
+            )
+            count = connection.execute(
+                sa.text("SELECT count(*) FROM protected_evidence")
+            ).scalar_one()
+            assert count == 0, "Pooled connection without patient context must see no rows"
+    finally:
+        runtime.dispose()
+
+
+def test_consent_idempotency_concurrent_same_key(client, identity):
+    """Concurrent requests with same idempotency key must produce exactly one event."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "idem-concurrent")
+
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "IDEM-CONC"
+    )
+
+    key = str(uuid4())
+    csrf_a = _csrf(client)
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.a")
+    csrf_b = _csrf(client_b)
+
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    results = {}
+
+    def submit(client, csrf, label):
+        barrier.wait(timeout=10)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+            json={
+                "purpose": "messaging",
+                "decision": "grant",
+                "notice_version_id": str(notice_id),
+                "method": "documentary",
+                "language": "en",
+                "evidence_id": str(evidence_id),
+            },
+            headers={"X-CSRF-Token": csrf, "Idempotency-Key": key},
+        )
+        results[label] = (response.status_code, response.json)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(submit, client, csrf_a, "a")
+        executor.submit(submit, client_b, csrf_b, "b")
+
+    statuses = {results[k][0] for k in results}
+    assert statuses == {201}, results
+    # Both should return the same event (idempotent replay)
+    event_ids = {results[k][1]["data"]["id"] for k in results}
+    assert len(event_ids) == 1, f"Expected single event, got {event_ids}"
+
+
+def test_consent_audit_failure_rolls_back_full(client, identity, monkeypatch):
+    """Audit failure during consent grant must roll back the entire transaction."""
+    import tunza.patients.routes as patient_routes
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "audit-consent")
+
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "AUDIT-CONSENT"
+    )
+
+    def fail_audit(**_kwargs):
+        raise SQLAlchemyError("synthetic audit failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(patient_routes, "_record_patient_audit", fail_audit)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+            json={
+                "purpose": "messaging",
+                "decision": "grant",
+                "notice_version_id": str(notice_id),
+                "method": "documentary",
+                "language": "en",
+                "evidence_id": str(evidence_id),
+            },
+            headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+        )
+        assert response.status_code == 503, response.json
+
+    # Verify no consent event was created despite the 503
+    events_response = client.get(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert events_response.status_code == 200
+    assert events_response.json["data"] == [], "No event should exist after audit failure rollback"
+
+    # Retry with working audit - should succeed
+    retry_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert retry_response.status_code == 201, retry_response.json

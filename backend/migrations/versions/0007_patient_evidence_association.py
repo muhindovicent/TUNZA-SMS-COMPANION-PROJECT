@@ -1,13 +1,13 @@
 """Patient-specific evidence association for consent grants.
 
-Revision ID: 0007_patient_evidence_association
+Revision ID: 0007_evidence_patient
 Revises: 0006_patient_eligibility_consent
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0007_patient_evidence_association"
+revision = "0007_evidence_patient"
 down_revision = "0006_patient_eligibility_consent"
 branch_labels = None
 depends_on = None
@@ -35,6 +35,9 @@ def upgrade() -> None:
         "protected_evidence",
         ["patient_id", "id"],
     )
+    # Drop any prior facility-level permissive policy so it cannot bypass
+    # patient-level restrictions
+    op.execute("DROP POLICY IF EXISTS protected_evidence_runtime_scope ON protected_evidence")
     op.execute("ALTER TABLE protected_evidence ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE protected_evidence FORCE ROW LEVEL SECURITY")
     op.execute(

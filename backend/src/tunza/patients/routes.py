@@ -1156,6 +1156,28 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
         or media_type not in {"application/pdf", "image/png", "image/jpeg"}
     ):
         return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    # Reject path traversal in storage reference
+    if ".." in storage_reference or storage_reference.startswith("/") or "\\" in storage_reference:
+        return _error(
+            "validation_failed",
+            "Storage reference contains invalid characters.",
+            422,
+        )
+    # Validate digest is a hex-encoded SHA-256 (64 hex chars = 32 bytes)
+    try:
+        digest_bytes = bytes.fromhex(digest)
+    except ValueError:
+        return _error(
+            "validation_failed",
+            "Digest must be a hex-encoded SHA-256 hash.",
+            422,
+        )
+    if len(digest_bytes) != 32:
+        return _error(
+            "validation_failed",
+            "Digest must be a SHA-256 hash (32 bytes).",
+            422,
+        )
     if not facility_scope_allows(context, facility_id, "consent.record"):
         return _deny_patient_access(context, "consent.record", "facility_scope")
     membership = _active_membership(context, facility_id)
@@ -1194,7 +1216,7 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
             patient_id=patient_id,
             facility_id=facility_id,
             storage_reference=storage_reference,
-            digest=digest.encode() if isinstance(digest, str) else digest,
+            digest=bytes.fromhex(digest),
             media_type=media_type,
             recorded_by=context.user.id,
         )

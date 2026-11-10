@@ -252,14 +252,14 @@ class ProtectedEvidence(db.Model):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    patient_id: Mapped[uuid.UUID] = mapped_column(
+    patient_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         ForeignKey(
             "patients.id",
             ondelete="RESTRICT",
             name="fk_protected_evidence_patient_id_patients",
         ),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     facility_id: Mapped[uuid.UUID] = mapped_column(
