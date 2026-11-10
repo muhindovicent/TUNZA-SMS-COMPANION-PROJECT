@@ -247,10 +247,21 @@ class ProtectedEvidence(db.Model):
     __tablename__ = "protected_evidence"
     __table_args__ = (
         UniqueConstraint("id", "facility_id", name="uq_protected_evidence_id_facility"),
+        UniqueConstraint("patient_id", "id", name="uq_protected_evidence_patient_id"),
         {"implicit_returning": False},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "patients.id",
+            ondelete="RESTRICT",
+            name="fk_protected_evidence_patient_id_patients",
+        ),
+        nullable=False,
+        index=True,
+    )
     facility_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
         ForeignKey(

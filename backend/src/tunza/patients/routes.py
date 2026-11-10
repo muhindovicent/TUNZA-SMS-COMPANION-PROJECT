@@ -903,12 +903,29 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             select(ProtectedEvidence).where(
                 ProtectedEvidence.id == evidence_id,
                 ProtectedEvidence.facility_id == facility_id,
+                ProtectedEvidence.patient_id == patient_id,
             )
         )
         if evidence is None:
             return _error(
                 "validation_failed",
-                "A valid evidence reference belonging to this facility is required for grant.",
+                "A valid evidence reference belonging to this patient and "
+                "facility is required for grant.",
+                422,
+            )
+        # Enforce patient ownership: evidence must not be referenced by another patient's
+        # consent event at this facility
+        evidence_used_by_another = db.session.scalar(
+            select(ConsentEvent.id).where(
+                ConsentEvent.evidence_id == evidence_id,
+                ConsentEvent.patient_id != patient_id,
+                ConsentEvent.facility_id == facility_id,
+            )
+        )
+        if evidence_used_by_another is not None:
+            return _error(
+                "validation_failed",
+                "This evidence reference is already associated with another patient.",
                 422,
             )
     # Validate evidence exists and belongs to the same facility (when provided)
@@ -1032,19 +1049,12 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "consent.read", "unavailable")
-    # Evidence must belong to the same facility AND be referenced by a consent event
-    # for this patient/facility to ensure patient+purpose correspondence
+    # Evidence must belong to the same patient AND facility
     evidence = db.session.scalar(
         select(ProtectedEvidence).where(
             ProtectedEvidence.id == evidence_id,
+            ProtectedEvidence.patient_id == patient_id,
             ProtectedEvidence.facility_id == facility_id,
-            ProtectedEvidence.id.in_(
-                select(ConsentEvent.evidence_id).where(
-                    ConsentEvent.patient_id == patient_id,
-                    ConsentEvent.facility_id == facility_id,
-                    ConsentEvent.evidence_id.is_not(None),
-                )
-            ),
         )
     )
     if evidence is None:
@@ -1095,14 +1105,8 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
     evidence_rows = list(
         db.session.scalars(
             select(ProtectedEvidence).where(
+                ProtectedEvidence.patient_id == patient_id,
                 ProtectedEvidence.facility_id == facility_id,
-                ProtectedEvidence.id.in_(
-                    select(ConsentEvent.evidence_id).where(
-                        ConsentEvent.patient_id == patient_id,
-                        ConsentEvent.facility_id == facility_id,
-                        ConsentEvent.evidence_id.is_not(None),
-                    )
-                ),
             )
         ).all()
     )
@@ -1128,3 +1132,92 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
             for evidence in evidence_rows
         ]
     ), 200
+
+
+@blueprint.post("/<uuid:patient_id>/evidence")
+@require_permission("consent.record")
+def register_evidence(patient_id: UUID) -> tuple[Response, int]:
+    """Register synthetic evidence for a patient so it can be selected during consent grant."""
+    context = get_access_context()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error("validation_failed", "A JSON request body is required.", 422)
+    if set(payload) - {"storage_reference", "digest", "media_type"}:
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    facility_id = _parse_uuid(request.args.get("facility_id"))
+    storage_reference = payload.get("storage_reference")
+    digest = payload.get("digest")
+    media_type = payload.get("media_type")
+    if (
+        facility_id is None
+        or not isinstance(storage_reference, str)
+        or not isinstance(digest, str)
+        or not isinstance(media_type, str)
+        or media_type not in {"application/pdf", "image/png", "image/jpeg"}
+    ):
+        return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
+    if not facility_scope_allows(context, facility_id, "consent.record"):
+        return _deny_patient_access(context, "consent.record", "facility_scope")
+    membership = _active_membership(context, facility_id)
+    if membership is None:
+        return _deny_patient_access(context, "consent.record", "facility_scope")
+    establish_patient_context(context, facility_id)
+    profile = db.session.scalar(
+        _assigned_profiles(context, facility_id).where(
+            FacilityPatientProfile.patient_id == patient_id
+        )
+    )
+    if profile is None:
+        return _deny_patient_access(context, "consent.record", "unavailable")
+    idempotency_key = _validate_idempotency_key()
+    if idempotency_key is None:
+        return _error("validation_failed", "A valid Idempotency-Key is required.", 422)
+    # Idempotency: check if evidence with same storage reference already exists
+    existing = db.session.scalar(
+        select(ProtectedEvidence).where(
+            ProtectedEvidence.patient_id == patient_id,
+            ProtectedEvidence.facility_id == facility_id,
+            ProtectedEvidence.storage_reference == storage_reference,
+        )
+    )
+    if existing is not None:
+        return jsonify(
+            data={
+                "id": str(existing.id),
+                "media_type": existing.media_type,
+                "version": existing.version,
+            }
+        ), 201
+    try:
+        evidence = ProtectedEvidence(
+            id=uuid4(),
+            patient_id=patient_id,
+            facility_id=facility_id,
+            storage_reference=storage_reference,
+            digest=digest.encode() if isinstance(digest, str) else digest,
+            media_type=media_type,
+            recorded_by=context.user.id,
+        )
+        db.session.add(evidence)
+        _record_patient_audit(
+            context=context,
+            permission="consent.record",
+            action="evidence.register",
+            facility_id=facility_id,
+            patient_id=patient_id,
+            metadata={"storage_reference": storage_reference},
+        )
+        db.session.flush()
+        response_data = {
+            "id": str(evidence.id),
+            "media_type": evidence.media_type,
+            "version": evidence.version,
+        }
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return _error("conflict", "The evidence reference already exists.", 409)
+    except SQLAlchemyError:
+        db.session.rollback()
+        return _service_unavailable()
+    return jsonify(data=response_data), 201

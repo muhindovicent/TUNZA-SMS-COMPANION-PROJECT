@@ -869,10 +869,15 @@ def _register_synthetic_patient(client, facility_id, reference_suffix="TEST"):
     return response.json["data"]["patient"]["id"]
 
 
-def _create_consent_fixtures(identity_app, facility_id, actor_id, notice_code_suffix="TEST"):
+def _create_consent_fixtures(
+    identity_app,
+    facility_id,
+    actor_id,
+    patient_id=None,
+    notice_code_suffix="TEST",
+):
     """Create a valid approved consent notice and evidence using the owner connection.
-    Also creates a seed consent event associating the evidence with a patient
-    so that list_evidence returns it for that patient."""
+    Optionally associates evidence with a patient for patient-specific selection."""
     owner = create_engine(
         postgres_url(
             os.environ.get("TEST_MIGRATION_DATABASE_URL") or os.environ["TEST_DATABASE_URL"]
@@ -906,14 +911,15 @@ def _create_consent_fixtures(identity_app, facility_id, actor_id, notice_code_su
             evidence_id = connection.execute(
                 sa.text(
                     "INSERT INTO protected_evidence "
-                    "(id, facility_id, storage_reference, digest, "
+                    "(id, patient_id, facility_id, storage_reference, digest, "
                     "media_type, recorded_by, version) "
-                    "VALUES (:id, :facility_id, :ref, :digest, "
+                    "VALUES (:id, :patient_id, :facility_id, :ref, :digest, "
                     ":media_type, :recorded_by, 1) "
                     "RETURNING id"
                 ),
                 {
                     "id": uuid4(),
+                    "patient_id": patient_id,
                     "facility_id": facility_id,
                     "ref": f"synthetic-evidence-{notice_code_suffix}",
                     "digest": b"synthetic-digest",
@@ -978,7 +984,7 @@ def test_consent_grant_withdraw_and_history(client, identity):
     patient_id = _register_synthetic_patient(client, facility_id, "consent-flow")
 
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "FLOW"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "FLOW"
     )
 
     grant_response = client.post(
@@ -1165,7 +1171,7 @@ def test_consent_events_append_only(client, identity):
 
     # Create a consent event through the API (existing visible row)
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "APPEND"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "APPEND"
     )
     create_response = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
@@ -1282,7 +1288,7 @@ def test_concurrent_consent_sequence_safety(identity):
     patient_id = _register_synthetic_patient(_login_client, facility_id, "concurrent-consent")
 
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "CONCURRENT"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "CONCURRENT"
     )
 
     client_b = identity.app.test_client()
@@ -1328,7 +1334,7 @@ def test_consent_withdraw_requires_facility_scope(client, identity):
 
     # Register a grant first
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "WITHDRAW"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "WITHDRAW"
     )
 
     grant_response = client.post(
@@ -1369,7 +1375,7 @@ def test_consent_withdraw_denied_without_facility_scope(client, identity):
 
     # Register a grant first (as vht.a at TST-A)
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_a, identity.user_ids["vht_a"], "WITHDRAW-CROSS"
+        identity.app, facility_a, identity.user_ids["vht_a"], patient_id, "WITHDRAW-CROSS"
     )
     client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_a}",
@@ -1408,7 +1414,7 @@ def test_consent_grant_requires_evidence(client, identity):
     patient_id = _register_synthetic_patient(client, facility_id, "grant-evidence")
 
     notice_id, _evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "EVIDENCE"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "EVIDENCE"
     )
 
     # Grant without evidence_id should fail (422)
@@ -1494,7 +1500,7 @@ def test_consent_idempotency_replay(client, identity):
     patient_id = _register_synthetic_patient(client, facility_id, "consent-idem")
 
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "IDEMPOTENCY"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "IDEMPOTENCY"
     )
 
     key = str(uuid4())
@@ -1553,7 +1559,7 @@ def test_cross_patient_evidence_list_denied(client, identity):
 
     # Create consent fixtures and a grant event for patient A
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "EV-LIST-A"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_a_id, "EV-LIST-A"
     )
     client.post(
         f"/api/v1/patients/{patient_a_id}/consent-events?facility_id={facility_id}",
@@ -1578,17 +1584,17 @@ def test_cross_patient_evidence_list_denied(client, identity):
 
 
 def test_consent_idempotency_actor_mismatch_rejected(client, identity):
-    """Same idempotency key used by a different actor must be rejected with 409."""
+    """Same idempotency key used by an unauthorised actor must get 404 before idempotency check."""
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "idem-actor")
 
     notice_id, evidence_id = _create_consent_fixtures(
-        identity.app, facility_id, identity.user_ids["vht_a"], "IDEM-ACTOR"
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "IDEM-ACTOR"
     )
 
     key = str(uuid4())
-    # First request by vht.a
+    # First request by vht.a (authorised for TST-A)
     response1 = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
         json={
@@ -1603,7 +1609,7 @@ def test_consent_idempotency_actor_mismatch_rejected(client, identity):
     )
     assert response1.status_code == 201, response1.json
 
-    # Second request by vht.b with same key but different actor -> 409
+    # Second request by vht.b (NOT authorised for TST-A) -> 404 before idempotency check
     client_b = identity.app.test_client()
     _login(client_b, "tst.vht.b")
     response2 = client_b.post(
@@ -1617,6 +1623,46 @@ def test_consent_idempotency_actor_mismatch_rejected(client, identity):
             "evidence_id": str(evidence_id),
         },
         headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": key},
+    )
+    assert response2.status_code == 404, response2.json
+
+
+def test_consent_idempotency_different_authorised_actor_rejected(client, identity):
+    """Same idempotency key used by a different authorised actor must be rejected with 409."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "idem-diff-actor")
+
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "IDEM-DIFF-ACTOR"
+    )
+
+    key = str(uuid4())
+    # First request by vht.a (authorised for TST-A)
+    response1 = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response1.status_code == 201, response1.json
+
+    # Second request by vht.a with same key but different payload -> 409
+    response2 = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "withdraw",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
     )
     assert response2.status_code == 409, response2.json
 
@@ -1636,3 +1682,181 @@ def test_evidence_list_unauthorized_patient_denied(client, identity):
         headers={"X-CSRF-Token": _csrf(client_b)},
     )
     assert response.status_code == 404, response.json
+
+
+def test_evidence_registration_for_patient(client, identity):
+    """Register synthetic evidence for a patient via POST endpoint."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-reg")
+
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-001",
+            "digest": "synthetic-digest-hex",
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 201, response.json
+    assert response.json["data"]["media_type"] == "application/pdf"
+    assert response.json["data"]["id"] is not None
+
+    # Re-register same evidence -> returns existing (idempotent)
+    response2 = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-001",
+            "digest": "synthetic-digest-hex",
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response2.status_code == 201, response2.json
+    assert response2.json["data"]["id"] == response.json["data"]["id"]
+
+
+def test_cross_patient_evidence_cannot_be_used_for_grant(client, identity):
+    """Patient A's evidence cannot be used for Patient B's consent grant (same facility)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_a_id = _register_synthetic_patient(client, facility_id, "cross-grant-a")
+    patient_b_id = _register_synthetic_patient(client, facility_id, "cross-grant-b")
+
+    # Create evidence associated with Patient A
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_a_id, "CROSS-GRANT"
+    )
+
+    # Patient B tries to grant using Patient A's evidence -> 422
+    response = client.post(
+        f"/api/v1/patients/{patient_b_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 422, response.json
+
+
+def test_patient_evidence_isolation_same_facility(client, identity):
+    """Patient A's evidence appears only for Patient A, not Patient B (same facility)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_a_id = _register_synthetic_patient(client, facility_id, "ev-iso-a")
+    patient_b_id = _register_synthetic_patient(client, facility_id, "ev-iso-b")
+
+    # Register evidence for Patient A
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_a_id, "EV-ISO-A"
+    )
+
+    # Patient A's evidence list includes the evidence
+    response_a = client.get(
+        f"/api/v1/patients/{patient_a_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert response_a.status_code == 200, response_a.json
+    assert len(response_a.json["data"]) >= 1
+    assert any(e["id"] == str(evidence_id) for e in response_a.json["data"])
+
+    # Patient B's evidence list is empty
+    response_b = client.get(
+        f"/api/v1/patients/{patient_b_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert response_b.status_code == 200, response_b.json
+    assert response_b.json["data"] == [], "Patient B should not see Patient A's evidence"
+
+
+def test_consent_grant_withdraw_full_flow(client, identity):
+    """Full consent grant → withdrawal → history flow with patient-specific evidence."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "full-flow")
+
+    # Register evidence for the patient
+    ev_response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-full-flow",
+            "digest": "synthetic-digest-full-flow",
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert ev_response.status_code == 201, ev_response.json
+    evidence_id = ev_response.json["data"]["id"]
+
+    # Create consent notice via owner connection
+    notice_id = None
+    with identity.app.app_context():
+        from tunza.identity.models import User
+
+        user = db.session.get(User, identity.user_ids["vht_a"])
+        from tunza.access import load_access_context
+        from tunza.patients.security import establish_patient_context
+
+        context = load_access_context(user)
+        establish_patient_context(context, facility_id)
+        notice_id = db.session.scalar(
+            sa.text(
+                "INSERT INTO consent_notice_versions "
+                "(id, notice_code, revision, language, text_cipher, purpose_codes, "
+                "status, effective_from, effective_to, version) "
+                "VALUES (:id, 'SYN-CONSENT-FLOW', 1, 'en', :cipher, "
+                "ARRAY['messaging'], 'approved', now() - interval '1 day', "
+                "now() + interval '1 year', 1) "
+                "RETURNING id"
+            ),
+            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
+        )
+        db.session.commit()
+
+    # Grant consent
+    grant_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert grant_response.status_code == 201, grant_response.json
+    assert grant_response.json["data"]["decision"] == "grant"
+    assert grant_response.json["data"]["evidence_id"] == str(evidence_id)
+
+    # Withdraw consent
+    withdraw_response = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "withdraw",
+            "method": "documentary",
+            "language": "en",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert withdraw_response.status_code == 201, withdraw_response.json
+    assert withdraw_response.json["data"]["decision"] == "withdraw"
+
+    # Verify history
+    events_response = client.get(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert events_response.status_code == 200
+    events = events_response.json["data"]
+    decisions = {event["decision"] for event in events}
+    assert "grant" in decisions
+    assert "withdraw" in decisions
