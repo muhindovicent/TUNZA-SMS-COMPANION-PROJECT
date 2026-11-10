@@ -36,6 +36,26 @@ class Patient(db.Model):
     )
 
 
+class RegistrationIdempotency(db.Model):
+    __tablename__ = "patient_registration_idempotency"
+    __table_args__ = (
+        UniqueConstraint("actor_id", "key", name="uq_patient_registration_actor_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    actor_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    facility_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("facilities.id"), nullable=False
+    )
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    response_cipher: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    key_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class FacilityPatientProfile(db.Model):
     __tablename__ = "facility_patient_profiles"
     __table_args__ = (

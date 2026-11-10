@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from flask import Response, current_app, g, jsonify, request
 from sqlalchemy import and_, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from tunza.access import facility_scope_allows, get_access_context, require_permission
@@ -22,6 +25,7 @@ from tunza.patients.models import (
     ParticipantAssignment,
     Patient,
     PregnancyEpisode,
+    RegistrationIdempotency,
 )
 from tunza.patients.security import establish_patient_context
 from tunza.services.encryption import decrypt_json, encrypt_json
@@ -171,7 +175,8 @@ def register_patient() -> tuple[Response, int]:
         return _error("validation_failed", "A JSON request body is required.", 422)
     if set(payload) - {"facility_id", "local_reference", "demographics", "language"}:
         return _error("validation_failed", UNKNOWN_FIELD_MESSAGE, 422)
-    if _validate_idempotency_key() is None:
+    idempotency_key = _validate_idempotency_key()
+    if idempotency_key is None:
         return _error("validation_failed", "A valid Idempotency-Key is required.", 422)
 
     facility_id = _parse_uuid(payload.get("facility_id"))
@@ -195,6 +200,18 @@ def register_patient() -> tuple[Response, int]:
         return _deny_patient_access(context, "patient.register", "facility_scope")
 
     establish_patient_context(context, facility_id)
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "facility_id": str(facility_id),
+                "local_reference": local_reference,
+                "demographics": demographics,
+                "language": language,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).digest()
     now = datetime.now(UTC)
     patient = Patient(id=uuid4())
     profile = FacilityPatientProfile(
@@ -233,6 +250,62 @@ def register_patient() -> tuple[Response, int]:
         valid_from=now,
     )
     try:
+        record_id = uuid4()
+        inserted = db.session.scalar(
+            insert(RegistrationIdempotency)
+            .values(
+                id=record_id,
+                actor_id=context.user.id,
+                facility_id=facility_id,
+                key=idempotency_key,
+                request_hash=request_hash,
+                key_version=current_app.config["PATIENT_KEY_VERSION"],
+            )
+            .on_conflict_do_nothing(index_elements=["actor_id", "key"])
+            .returning(RegistrationIdempotency.id)
+        )
+        if inserted is None:
+            existing = db.session.scalar(
+                select(RegistrationIdempotency).where(
+                    RegistrationIdempotency.actor_id == context.user.id,
+                    RegistrationIdempotency.key == idempotency_key,
+                )
+            )
+            if existing is None or existing.request_hash != request_hash:
+                db.session.rollback()
+                return _error("conflict", "The idempotency key was already used.", 409)
+            if existing.response_cipher is None:
+                db.session.rollback()
+                return _error("request_in_progress", "The request is in progress.", 409)
+            result = decrypt_json(
+                existing.response_cipher,
+                key=current_app.config["PATIENT_ENCRYPTION_KEY"],
+                key_version=existing.key_version,
+                purpose="patient-registration-response",
+            )
+            replay_patient_id = UUID(result["patient"]["id"])
+            if (
+                db.session.scalar(
+                    _assigned_profiles(context, facility_id).where(
+                        FacilityPatientProfile.patient_id == replay_patient_id
+                    )
+                )
+                is None
+            ):
+                return _deny_patient_access(context, "patient.register", "unavailable")
+            _record_patient_audit(
+                context=context,
+                permission="patient.register",
+                action="patient.read",
+                facility_id=facility_id,
+                patient_id=replay_patient_id,
+            )
+            db.session.commit()
+            response = jsonify(data=result)
+            response.headers["Location"] = (
+                f"/api/v1/patients/{replay_patient_id}?facility_id={facility_id}"
+            )
+            return response, 201
         # These models have no ORM relationships, so order the FK-dependent
         # inserts explicitly while retaining a single atomic transaction.
         for row in (
@@ -265,6 +338,13 @@ def register_patient() -> tuple[Response, int]:
             "participant_assignment_id": str(participant_assignment.id),
         }
         patient_location = f"/api/v1/patients/{patient.id}?facility_id={facility_id}"
+        record = db.session.get(RegistrationIdempotency, record_id)
+        record.response_cipher = encrypt_json(
+            response_data,
+            key=current_app.config["PATIENT_ENCRYPTION_KEY"],
+            key_version=record.key_version,
+            purpose="patient-registration-response",
+        )
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
