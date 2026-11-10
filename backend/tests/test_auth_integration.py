@@ -869,6 +869,61 @@ def _register_synthetic_patient(client, facility_id, reference_suffix="TEST"):
     return response.json["data"]["patient"]["id"]
 
 
+def _create_consent_fixtures(identity_app, facility_id, actor_id, notice_code_suffix="TEST"):
+    """Create a valid approved consent notice and evidence using the owner connection."""
+    owner = create_engine(
+        postgres_url(
+            os.environ.get("TEST_MIGRATION_DATABASE_URL") or os.environ["TEST_DATABASE_URL"]
+        )
+    )
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                text(
+                    "SELECT set_config('tunza.actor_id', :actor, true), "
+                    "set_config('tunza.facility_id', :facility, true)"
+                ),
+                {"actor": str(actor_id), "facility": facility_id},
+            )
+            notice_id = connection.execute(
+                sa.text(
+                    "INSERT INTO consent_notice_versions "
+                    "(id, notice_code, revision, language, text_cipher, purpose_codes, "
+                    "status, effective_from, effective_to, version) "
+                    "VALUES (:id, :notice_code, 1, 'en', :cipher, "
+                    "ARRAY['messaging'], 'approved', now() - interval '1 day', "
+                    "now() + interval '1 year', 1) "
+                    "RETURNING id"
+                ),
+                {
+                    "id": uuid4(),
+                    "notice_code": f"SYN-CONSENT-{notice_code_suffix}",
+                    "cipher": b"synthetic-notice-cipher",
+                },
+            ).scalar_one()
+            evidence_id = connection.execute(
+                sa.text(
+                    "INSERT INTO protected_evidence "
+                    "(id, facility_id, storage_reference, digest, "
+                    "media_type, recorded_by, version) "
+                    "VALUES (:id, :facility_id, :ref, :digest, "
+                    ":media_type, :recorded_by, 1) "
+                    "RETURNING id"
+                ),
+                {
+                    "id": uuid4(),
+                    "facility_id": facility_id,
+                    "ref": f"synthetic-evidence-{notice_code_suffix}",
+                    "digest": b"synthetic-digest",
+                    "media_type": "application/pdf",
+                    "recorded_by": actor_id,
+                },
+            ).scalar_one()
+        return notice_id, evidence_id
+    finally:
+        owner.dispose()
+
+
 def test_eligibility_record_defaults_to_ineligible(client, identity):
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
@@ -920,46 +975,9 @@ def test_consent_grant_withdraw_and_history(client, identity):
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "consent-flow")
 
-    with identity.app.app_context():
-        # Establish actor context for test data setup (D03 unresolved - test fixture only)
-        from tunza.access import load_access_context
-        from tunza.identity.models import User
-
-        user = db.session.get(User, identity.user_ids["vht_a"])
-        context = load_access_context(user)
-        from tunza.patients.security import establish_patient_context
-
-        establish_patient_context(context, facility_id)
-        # Create a synthetic consent notice version (D03 unresolved - test fixture only)
-        notice_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO consent_notice_versions "
-                "(id, notice_code, revision, language, "
-                "text_cipher, purpose_codes, status, version) "
-                "VALUES (:id, 'SYN-CONSENT-001', 1, 'en', :cipher, "
-                "ARRAY['messaging'], 'approved', 1) "
-                "RETURNING id"
-            ),
-            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
-        )
-        # Create synthetic protected evidence (D03 unresolved - test fixture only)
-        evidence_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO protected_evidence "
-                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
-                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
-                "RETURNING id"
-            ),
-            {
-                "id": uuid4(),
-                "facility_id": facility_id,
-                "ref": "synthetic-evidence-ref",
-                "digest": b"synthetic-digest",
-                "media_type": "application/pdf",
-                "recorded_by": identity.user_ids["vht_a"],
-            },
-        )
-        db.session.commit()
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "FLOW"
+    )
 
     grant_response = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
@@ -1158,9 +1176,10 @@ def test_consent_events_append_only(client, identity):
                 "INSERT INTO consent_events "
                 "(id, patient_id, facility_id, purpose, decision, "
                 "method, language, effective_at, recorded_by, "
-                "event_sequence) "
+                "idempotency_key, request_hash, event_sequence) "
                 "VALUES (:id, :patient_id, :facility_id, :purpose, :decision, "
-                ":method, :language, :effective_at, :recorded_by, 1) "
+                ":method, :language, :effective_at, :recorded_by, "
+                ":idempotency_key, :request_hash, 1) "
                 "RETURNING id"
             ),
             {
@@ -1173,6 +1192,8 @@ def test_consent_events_append_only(client, identity):
                 "language": "en",
                 "effective_at": "2026-01-15T10:00:00Z",
                 "recorded_by": identity.user_ids["vht_a"],
+                "idempotency_key": str(uuid4()),
+                "request_hash": b"synthetic-request-hash",
             },
         )
         db.session.commit()
@@ -1250,6 +1271,10 @@ def test_concurrent_consent_sequence_safety(identity):
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(_login_client, facility_id, "concurrent-consent")
 
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "CONCURRENT"
+    )
+
     client_b = identity.app.test_client()
     _login(client_b, "tst.vht.a")
 
@@ -1268,8 +1293,8 @@ def test_concurrent_consent_sequence_safety(identity):
                 "decision": "grant",
                 "method": "documentary",
                 "language": "en",
-                "notice_version_id": str(uuid4()),
-                "evidence_id": str(uuid4()),
+                "notice_version_id": str(notice_id),
+                "evidence_id": str(evidence_id),
             },
             headers={"X-CSRF-Token": csrf, "Idempotency-Key": str(uuid4())},
         )
@@ -1292,41 +1317,9 @@ def test_consent_withdraw_requires_facility_scope(client, identity):
     patient_id = _register_synthetic_patient(client, facility_id, "withdraw-scope")
 
     # Register a grant first
-    with identity.app.app_context():
-        from tunza.access import load_access_context
-        from tunza.identity.models import User
-        from tunza.patients.security import establish_patient_context
-
-        user = db.session.get(User, identity.user_ids["vht_a"])
-        context = load_access_context(user)
-        establish_patient_context(context, facility_id)
-        notice_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO consent_notice_versions "
-                "(id, notice_code, revision, language, "
-                "text_cipher, purpose_codes, status, version) "
-                "VALUES (:id, 'SYN-CONSENT-WITHDRAW', 1, 'en', :cipher, "
-                "ARRAY['messaging'], 'approved', 1) RETURNING id"
-            ),
-            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
-        )
-        evidence_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO protected_evidence "
-                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
-                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
-                "RETURNING id"
-            ),
-            {
-                "id": uuid4(),
-                "facility_id": facility_id,
-                "ref": "withdraw-evidence-ref",
-                "digest": b"withdraw-digest",
-                "media_type": "application/pdf",
-                "recorded_by": identity.user_ids["vht_a"],
-            },
-        )
-        db.session.commit()
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "WITHDRAW"
+    )
 
     grant_response = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
@@ -1362,25 +1355,9 @@ def test_consent_grant_requires_evidence(client, identity):
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "grant-evidence")
 
-    with identity.app.app_context():
-        from tunza.access import load_access_context
-        from tunza.identity.models import User
-        from tunza.patients.security import establish_patient_context
-
-        user = db.session.get(User, identity.user_ids["vht_a"])
-        context = load_access_context(user)
-        establish_patient_context(context, facility_id)
-        notice_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO consent_notice_versions "
-                "(id, notice_code, revision, language, "
-                "text_cipher, purpose_codes, status, version) "
-                "VALUES (:id, 'SYN-CONSENT-EVIDENCE', 1, 'en', :cipher, "
-                "ARRAY['messaging'], 'approved', 1) RETURNING id"
-            ),
-            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
-        )
-        db.session.commit()
+    notice_id, _evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "EVIDENCE"
+    )
 
     # Grant without evidence_id should fail (422)
     response = client.post(
@@ -1413,7 +1390,7 @@ def test_consent_grant_requires_evidence(client, identity):
 
 
 def test_eligibility_idempotency_replay(client, identity):
-    """Same idempotency key replays the existing eligibility check."""
+    """Same idempotency key replays the existing eligibility check; different payload rejects."""
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "elig-idem")
@@ -1431,11 +1408,12 @@ def test_eligibility_idempotency_replay(client, identity):
     assert response1.status_code == 201, response1.json
     seq1 = response1.json["data"]["sequence"]
 
+    # Same key, same payload -> replay returns original
     response2 = client.post(
         f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
         json={
             "method": "documentary",
-            "result": "ineligible",
+            "result": "verified",
             "checked_at": "2026-01-15T10:00:00Z",
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
@@ -1444,48 +1422,28 @@ def test_eligibility_idempotency_replay(client, identity):
     assert response2.json["data"]["sequence"] == seq1
     assert response2.json["data"]["result"] == "verified"
 
+    # Same key, different payload -> conflict
+    response3 = client.post(
+        f"/api/v1/patients/{patient_id}/eligibility?facility_id={facility_id}",
+        json={
+            "method": "documentary",
+            "result": "ineligible",
+            "checked_at": "2026-01-15T10:00:00Z",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response3.status_code == 409, response3.json
+
 
 def test_consent_idempotency_replay(client, identity):
-    """Same idempotency key replays the existing consent event."""
+    """Same idempotency key replays the existing consent event; different payload rejects."""
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
     patient_id = _register_synthetic_patient(client, facility_id, "consent-idem")
 
-    with identity.app.app_context():
-        from tunza.access import load_access_context
-        from tunza.identity.models import User
-        from tunza.patients.security import establish_patient_context
-
-        user = db.session.get(User, identity.user_ids["vht_a"])
-        context = load_access_context(user)
-        establish_patient_context(context, facility_id)
-        notice_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO consent_notice_versions "
-                "(id, notice_code, revision, language, "
-                "text_cipher, purpose_codes, status, version) "
-                "VALUES (:id, 'SYN-CONSENT-IDEM', 1, 'en', :cipher, "
-                "ARRAY['messaging'], 'approved', 1) RETURNING id"
-            ),
-            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
-        )
-        evidence_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO protected_evidence "
-                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
-                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
-                "RETURNING id"
-            ),
-            {
-                "id": uuid4(),
-                "facility_id": facility_id,
-                "ref": "consent-idem-evidence",
-                "digest": b"consent-idem-digest",
-                "media_type": "application/pdf",
-                "recorded_by": identity.user_ids["vht_a"],
-            },
-        )
-        db.session.commit()
+    notice_id, evidence_id = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], "IDEMPOTENCY"
+    )
 
     key = str(uuid4())
     response1 = client.post(
@@ -1503,7 +1461,25 @@ def test_consent_idempotency_replay(client, identity):
     assert response1.status_code == 201, response1.json
     seq1 = response1.json["data"]["event_sequence"]
 
+    # Same key, same payload -> replay returns original
     response2 = client.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response2.status_code == 201, response2.json
+    assert response2.json["data"]["event_sequence"] == seq1
+    assert response2.json["data"]["decision"] == "grant"
+
+    # Same key, different payload -> conflict
+    response3 = client.post(
         f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
         json={
             "purpose": "messaging",
@@ -1513,6 +1489,4 @@ def test_consent_idempotency_replay(client, identity):
         },
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
     )
-    assert response2.status_code == 201, response2.json
-    assert response2.json["data"]["event_sequence"] == seq1
-    assert response2.json["data"]["decision"] == "grant"
+    assert response3.status_code == 409, response3.json

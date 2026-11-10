@@ -119,7 +119,6 @@ def upgrade() -> None:
         "tunza_current_uuid('tunza.actor_id') IS NOT NULL",
     )
     op.execute(f"GRANT SELECT ON consent_notice_versions TO {RUNTIME_ROLE}")
-    op.execute(f"GRANT INSERT ON consent_notice_versions TO {RUNTIME_ROLE}")
 
     op.create_table(
         "adult_eligibility_checks",
@@ -143,6 +142,8 @@ def upgrade() -> None:
         ),
         sa.Column("evidence_id", sa.Uuid(), nullable=True),
         sa.Column("idempotency_key", sa.String(128), nullable=True),
+        sa.Column("actor_id", sa.Uuid(), nullable=False),
+        sa.Column("request_hash", sa.LargeBinary(), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column(
             "created_at",
@@ -160,6 +161,12 @@ def upgrade() -> None:
             ["patient_id", "facility_id"],
             ["facility_patient_profiles.patient_id", "facility_patient_profiles.facility_id"],
             name="fk_adult_eligibility_patient_facility_profiles",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["actor_id"],
+            ["users.id"],
+            name="fk_adult_eligibility_actor_id_users",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
@@ -222,6 +229,7 @@ def upgrade() -> None:
         ),
         sa.Column("evidence_id", sa.Uuid(), nullable=True),
         sa.Column("idempotency_key", sa.String(128), nullable=True),
+        sa.Column("request_hash", sa.LargeBinary(), nullable=False),
         sa.Column("supersedes_id", sa.Uuid(), nullable=True),
         sa.Column("event_sequence", sa.Integer(), nullable=False),
         sa.Column(

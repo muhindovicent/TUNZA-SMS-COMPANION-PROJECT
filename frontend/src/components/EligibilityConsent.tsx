@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { FormEvent } from 'react'
 import { apiFetch } from '../api/client'
 import type { StaffIdentity } from '../api/auth'
@@ -10,6 +10,19 @@ interface EligibilityCheck {
   method: string
   result: string
   checked_at: string
+  sequence: number
+  version: number
+}
+
+interface ConsentNotice {
+  id: string
+  notice_code: string
+  revision: number
+  language: string
+  status: string
+  purpose_codes: string[]
+  effective_from: string | null
+  effective_to: string | null
   version: number
 }
 
@@ -32,6 +45,9 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
   const [patient, setPatient] = useState<{ id: string; facility_id: string; local_reference: string } | null>(null)
   const [eligibility, setEligibility] = useState<EligibilityCheck | null>(null)
   const [consentEvents, setConsentEvents] = useState<ConsentEvent[]>([])
+  const [consentNotices, setConsentNotices] = useState<ConsentNotice[]>([])
+  const [selectedNoticeId, setSelectedNoticeId] = useState<string | null>(null)
+  const [evidenceReference, setEvidenceReference] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState('uncertain')
@@ -45,10 +61,18 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
   const canWithdrawConsent = identity.permissions.includes('consent.withdraw')
   const canReadConsent = identity.permissions.includes('consent.read')
 
+  useEffect(() => {
+    apiFetch<ConsentNotice[]>('/consent-notices?purpose=messaging&language=en', { method: 'GET' })
+      .then(notices => setConsentNotices(notices || []))
+      .catch(() => setConsentNotices([]))
+  }, [])
+
   async function findPatient() {
     setPatient(null)
     setEligibility(null)
     setConsentEvents([])
+    setSelectedNoticeId(null)
+    setEvidenceReference('')
     setMessage('')
     setBusy(true)
     try {
@@ -123,12 +147,31 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
     setBusy(true)
     setMessage('')
     try {
+      const body: Record<string, unknown> = {
+        purpose: consentPurpose,
+        decision: consentDecision,
+        method: consentMethod,
+        language: 'en',
+      }
+      if (consentDecision === 'grant') {
+        if (!selectedNoticeId) {
+          setMessage('A consent notice must be selected for grant.')
+          setBusy(false)
+          return
+        }
+        body.notice_version_id = selectedNoticeId
+        if (evidenceReference) {
+          body.evidence_id = evidenceReference
+        }
+      }
       await apiFetch<ConsentEvent>(`/patients/${encodeURIComponent(patient.id)}/consent-events?facility_id=${encodeURIComponent(facility)}`, {
         method: 'POST',
-        body: { purpose: consentPurpose, decision: consentDecision, method: consentMethod, language: 'en' },
+        body,
         idempotencyKey: crypto.randomUUID(),
       })
       await loadConsentEvents(patient.id)
+      setSelectedNoticeId(null)
+      setEvidenceReference('')
       setMessage(`Consent ${consentDecision} recorded.`)
     } catch {
       setMessage('Consent could not be recorded.')
@@ -136,6 +179,13 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
       setBusy(false)
     }
   }
+
+  const selectedNotice = consentNotices.find(n => n.id === selectedNoticeId)
+  const noticeValid = selectedNotice
+    ? selectedNotice.status === 'approved'
+      && selectedNotice.purpose_codes.includes(consentPurpose)
+      && selectedNotice.language === 'en'
+    : false
 
   return (
     <section className="content-width" aria-labelledby="eligibility-consent-title">
@@ -200,13 +250,29 @@ export default function EligibilityConsent({ identity }: { identity: StaffIdenti
                 <option value="correct">Correct</option>
               </select>
             </label>
+            {consentDecision === 'grant' && <>
+              <label>Consent notice
+                <select value={selectedNoticeId ?? ''} onChange={(event) => setSelectedNoticeId(event.target.value || null)}>
+                  <option value="">Select a notice</option>
+                  {consentNotices.map((notice) => (
+                    <option key={notice.id} value={notice.id}>
+                      {notice.notice_code} r{notice.revision} ({notice.language})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>Evidence reference
+                <input value={evidenceReference} onChange={(event) => setEvidenceReference(event.target.value)} placeholder="Optional evidence reference" />
+              </label>
+              {!noticeValid && selectedNoticeId && <p role="status" style={{ color: 'red' }}>Selected notice is not valid for this purpose/language.</p>}
+            </>}
             <label>Method
               <select value={consentMethod} onChange={(event) => setConsentMethod(event.target.value)}>
                 <option value="documentary">Documentary</option>
                 <option value="verbal">Verbal</option>
               </select>
             </label>
-            <button type="submit" disabled={busy || !canWithdrawConsent && consentDecision === 'withdraw'}>
+            <button type="submit" disabled={busy || (consentDecision === 'grant' && (!selectedNoticeId || !noticeValid)) || (!canWithdrawConsent && consentDecision === 'withdraw')}>
               Record consent {consentDecision}
             </button>
           </form>

@@ -321,8 +321,14 @@ class AdultEligibilityCheck(db.Model):
         ForeignKey("users.id", ondelete="RESTRICT", name="fk_adult_eligibility_checked_by_users"),
         nullable=False,
     )
+    actor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="RESTRICT", name="fk_adult_eligibility_actor_id_users"),
+        nullable=False,
+    )
     evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -439,6 +445,7 @@ class ConsentEvent(db.Model):
     )
     evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
