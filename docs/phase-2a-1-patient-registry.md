@@ -12,6 +12,15 @@ application authorization and assignment checks remain necessary. The API databa
 must be a non-owner role without superuser or BYPASSRLS privileges. Synthetic demographics and
 registration replay responses are encrypted using the configured patient key and key version.
 
+The API connects directly with `DATABASE_URL` as `tunza_runtime`: `SESSION_USER` and
+`CURRENT_USER` must both be that role. Connections fail closed when the role has superuser,
+BYPASSRLS, database/role creation or replication privileges, any role membership, schema creation
+privilege, or ownership of the database, public schema, or public relations. Do not use a privileged
+login and `SET ROLE`. The migration command requires a distinct `MIGRATION_DATABASE_URL` owner
+login; supply it only to migration processes. The disposable PostgreSQL CI service uses two login
+roles with trust authentication confined to the isolated local test service. Integration tests
+require `TEST_DATABASE_URL` for the runtime login and `TEST_MIGRATION_DATABASE_URL` for its owner.
+
 Registration requires an `Idempotency-Key`. The actor and key uniquely identify a request;
 retries with matching normalized input receive the encrypted stored result only after current
 authorization and assignment are checked. Concurrent requests serialize on the unique key.

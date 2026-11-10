@@ -45,13 +45,25 @@ def admin_app():
         or not url.database.endswith("_test")
     ):
         pytest.fail("Integration tests require a dedicated local tunza_*_test database.")
+    migration_value = os.environ.get("TEST_MIGRATION_DATABASE_URL")
+    if not migration_value:
+        pytest.fail("Set TEST_MIGRATION_DATABASE_URL to the separate disposable owner login.")
+    migration_url = postgres_url(migration_value, "TEST_MIGRATION_DATABASE_URL")
+    if (migration_url.host, migration_url.port, migration_url.database) != (
+        url.host,
+        url.port,
+        url.database,
+    ) or migration_url.username == url.username:
+        pytest.fail(
+            "Test runtime and migration users must be distinct and target the same database."
+        )
 
     application = create_app(
         {
             "APP_ENV": "testing",
             "SECRET_KEY": secrets.token_urlsafe(48),
             "DATABASE_URL": value,
-            "MIGRATION_DATABASE_URL": value,
+            "MIGRATION_DATABASE_URL": migration_value,
             "SESSION_COOKIE_SECURE": False,
         }
     )

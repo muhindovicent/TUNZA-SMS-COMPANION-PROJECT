@@ -56,7 +56,7 @@ postgresql+psycopg://USER:PASSWORD@127.0.0.1:5432/DATABASE
 
 URL-encode special characters in credentials. PostgreSQL URLs using `postgresql://` or `postgres://` normalize to the psycopg driver. SQLite/MySQL URLs and incomplete PostgreSQL URLs are rejected. There is no database or secret fallback.
 
-Optional `MIGRATION_DATABASE_URL` separates the migration-owner connection from the runtime connection. Leave it blank for a simple local disposable database. The eventual clinical API must use a non-owner, non-BYPASSRLS runtime role; this milestone creates no clinical schema or authorization policies.
+Phase 2A-1 supersedes this earlier setup: migrations require a separate `MIGRATION_DATABASE_URL`, and the API must connect directly as the restricted runtime role. See [Phase 2A-1](phase-2a-1-patient-registry.md).
 
 The factory loads only the root `.env`, with process environment taking precedence. Backend configuration is evaluated per factory instance, not at import. Debug and SQL echo are off by default. The key is configured for future framework use; no authentication/session routes exist yet.
 
@@ -171,7 +171,7 @@ On macOS/Linux use `../.venv/bin/python`. Unit tests require no database and nev
 
 Create a separate **empty** loopback database whose name starts with `tunza_` and ends with `_test`. Set `TEST_DATABASE_URL` in the test process only, then run `python -m pytest -m integration` from `backend/`. The test rejects nonlocal or incorrectly named databases and databases containing application tables. It performs a migration upgrade, idempotent upgrade, metadata check, downgrade, re-upgrade and real readiness query. It must never target your development data or any shared/clinical database.
 
-Use an isolated test-owner connection for inspecting Alembic history. `TEST_MIGRATION_DATABASE_URL` may explicitly select the same isolated owner; it must target the exact same host, port and database, and is independent of the application's normal migration environment setting. With no `TEST_DATABASE_URL`, pytest reports the integration test as **skipped**, not passed.
+Use `TEST_DATABASE_URL` for the restricted test runtime login and `TEST_MIGRATION_DATABASE_URL` for the distinct test owner; both must target the exact same host, port and database. With no `TEST_DATABASE_URL`, pytest reports the integration test as **skipped**, not passed.
 
 ### Frontend (working directory `frontend/`)
 

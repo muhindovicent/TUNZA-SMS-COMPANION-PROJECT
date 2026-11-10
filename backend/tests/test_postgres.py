@@ -32,6 +32,8 @@ def test_postgres_migration_roundtrip_and_readiness():
         url.database,
     ):
         pytest.fail("The migration test connection must target the same disposable local database.")
+    if migration_url.username == url.username:
+        pytest.fail("Integration tests require separate runtime and migration database users.")
 
     application = create_app(
         {
@@ -75,10 +77,66 @@ def test_postgres_migration_roundtrip_and_readiness():
                 "users",
             }
             assert set(inspect(db.engine).get_table_names()) == expected_tables
+            privileged_app = create_app(
+                {
+                    "APP_ENV": "testing",
+                    "SECRET_KEY": secrets.token_urlsafe(48),
+                    "DATABASE_URL": migration_value,
+                    "MIGRATION_DATABASE_URL": migration_value,
+                }
+            )
+            with privileged_app.app_context():
+                with pytest.raises(RuntimeError, match="Runtime database login"):
+                    db.engine.connect()
+                db.engine.dispose()
+            for grant, revoke in (
+                ("ALTER ROLE tunza_runtime BYPASSRLS", "ALTER ROLE tunza_runtime NOBYPASSRLS"),
+                (
+                    "GRANT pg_read_all_data TO tunza_runtime",
+                    "REVOKE pg_read_all_data FROM tunza_runtime",
+                ),
+            ):
+                try:
+                    with migration_engine.begin() as connection:
+                        connection.execute(text(grant))
+                    probe = create_app(
+                        {
+                            "APP_ENV": "testing",
+                            "SECRET_KEY": secrets.token_urlsafe(48),
+                            "DATABASE_URL": value,
+                            "MIGRATION_DATABASE_URL": migration_value,
+                        }
+                    )
+                    with probe.app_context():
+                        with pytest.raises(RuntimeError, match="Runtime database login"):
+                            db.engine.connect()
+                        db.engine.dispose()
+                finally:
+                    with migration_engine.begin() as connection:
+                        connection.execute(text(revoke))
             with db.engine.connect() as connection:
-                assert (
-                    connection.execute(text("SELECT current_user")).scalar_one() == "tunza_runtime"
-                )
+                session_user, current_user = connection.execute(
+                    text("SELECT session_user, current_user")
+                ).one()
+                assert session_user == current_user == "tunza_runtime"
+                assert connection.execute(
+                    text(
+                        "SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreatedb "
+                        "AND NOT rolcreaterole AND NOT rolreplication "
+                        "FROM pg_roles WHERE rolname = session_user"
+                    )
+                ).scalar_one()
+                assert not connection.execute(
+                    text("SELECT has_schema_privilege(current_user, 'public', 'CREATE')")
+                ).scalar_one()
+                assert not connection.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = 'public' AND c.relowner = "
+                        "(SELECT oid FROM pg_roles WHERE rolname = current_user))"
+                    )
+                ).scalar_one()
                 connection.execute(
                     text("SELECT set_config('tunza.facility_id', :facility, true)"),
                     {"facility": "00000000-0000-4000-8000-000000000001"},

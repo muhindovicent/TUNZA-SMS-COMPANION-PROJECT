@@ -47,13 +47,25 @@ def identity_app():
         or not url.database.endswith("_test")
     ):
         pytest.fail("Integration tests require a dedicated local tunza_*_test database.")
+    migration_value = os.environ.get("TEST_MIGRATION_DATABASE_URL")
+    if not migration_value:
+        pytest.fail("Set TEST_MIGRATION_DATABASE_URL to the separate disposable owner login.")
+    migration_url = postgres_url(migration_value, "TEST_MIGRATION_DATABASE_URL")
+    if (migration_url.host, migration_url.port, migration_url.database) != (
+        url.host,
+        url.port,
+        url.database,
+    ) or migration_url.username == url.username:
+        pytest.fail(
+            "Test runtime and migration users must be distinct and target the same database."
+        )
 
     application = create_app(
         {
             "APP_ENV": "testing",
             "SECRET_KEY": secrets.token_urlsafe(48),
             "DATABASE_URL": value,
-            "MIGRATION_DATABASE_URL": value,
+            "MIGRATION_DATABASE_URL": migration_value,
             "SESSION_COOKIE_SECURE": False,
         }
     )
@@ -268,9 +280,7 @@ def test_synthetic_patient_registration_and_read(client, identity):
     detail = client.get(f"/api/v1/patients/{patient_id}?facility_id={facility_id}")
     assert detail.status_code == 200
     assert detail.json["data"]["id"] == patient_id
-    runtime_url = postgres_url(os.environ["TEST_DATABASE_URL"]).set(
-        username="tunza_runtime", password=None
-    )
+    runtime_url = postgres_url(os.environ["TEST_DATABASE_URL"])
     runtime = create_engine(runtime_url, pool_size=1, max_overflow=0)
     try:
         with runtime.connect() as connection:

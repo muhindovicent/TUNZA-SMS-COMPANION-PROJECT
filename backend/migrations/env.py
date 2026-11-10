@@ -14,9 +14,11 @@ if config.config_file_name:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = db.metadata
-database_url = (
-    current_app.config["MIGRATION_DATABASE_URL"] or current_app.config["SQLALCHEMY_DATABASE_URI"]
-)
+database_url = current_app.config["MIGRATION_DATABASE_URL"]
+if database_url is None:
+    raise RuntimeError("MIGRATION_DATABASE_URL is required for migrations.")
+if database_url.username == current_app.config["SQLALCHEMY_DATABASE_URI"].username:
+    raise RuntimeError("Migration and runtime database users must be distinct.")
 
 
 def run_migrations_offline() -> None:
