@@ -932,8 +932,10 @@ def test_consent_grant_withdraw_and_history(client, identity):
         notice_id = db.session.scalar(
             sa.text(
                 "INSERT INTO consent_notice_versions "
-                "(id, notice_code, revision, language, text_cipher, purpose_codes, status, version) "
-                "VALUES (:id, 'SYN-CONSENT-001', 1, 'en', :cipher, ARRAY['messaging'], 'approved', 1) "
+                "(id, notice_code, revision, language, "
+                "text_cipher, purpose_codes, status, version) "
+                "VALUES (:id, 'SYN-CONSENT-001', 1, 'en', :cipher, "
+                "ARRAY['messaging'], 'approved', 1) "
                 "RETURNING id"
             ),
             {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
@@ -1057,7 +1059,7 @@ def test_cross_patient_evidence_denied(client, identity):
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
 
-    patient_a_id = _register_synthetic_patient(client, facility_id, "cross-ev-a")
+    _register_synthetic_patient(client, facility_id, "cross-ev-a")
     patient_b_id = _register_synthetic_patient(client, facility_id, "cross-ev-b")
 
     with identity.app.app_context():
@@ -1149,8 +1151,11 @@ def test_consent_events_append_only(client, identity):
         event_id = db.session.scalar(
             sa.text(
                 "INSERT INTO consent_events "
-                "(id, patient_id, facility_id, purpose, decision, method, language, effective_at, recorded_by, event_sequence) "
-                "VALUES (:id, :patient_id, :facility_id, :purpose, :decision, :method, :language, :effective_at, :recorded_by, 1) "
+                "(id, patient_id, facility_id, purpose, decision, "
+                "method, language, effective_at, recorded_by, "
+                "event_sequence) "
+                "VALUES (:id, :patient_id, :facility_id, :purpose, :decision, "
+                "method, language, effective_at, recorded_by, 1) "
                 "RETURNING id"
             ),
             {
@@ -1176,7 +1181,7 @@ def test_consent_events_append_only(client, identity):
                 {"id": event_id},
             )
             db.session.commit()
-            assert False, "UPDATE should have failed due to append-only trigger"
+            raise AssertionError("UPDATE should have failed due to append-only trigger")
         except Exception:
             db.session.rollback()
 
@@ -1187,7 +1192,7 @@ def test_consent_events_append_only(client, identity):
                 {"id": event_id},
             )
             db.session.commit()
-            assert False, "DELETE should have failed due to append-only trigger"
+            raise AssertionError("DELETE should have failed due to append-only trigger")
         except Exception:
             db.session.rollback()
 
