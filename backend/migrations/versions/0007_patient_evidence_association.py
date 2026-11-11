@@ -54,3 +54,8 @@ def downgrade() -> None:
     op.execute("DROP POLICY IF EXISTS protected_evidence_patient_scope ON protected_evidence")
     op.drop_constraint("uq_protected_evidence_patient_id", "protected_evidence", type_="unique")
     op.drop_column("protected_evidence", "patient_id")
+    op.execute(
+        "CREATE POLICY protected_evidence_runtime_scope ON protected_evidence "
+        "USING (facility_id = tunza_current_uuid('tunza.facility_id')) "
+        "WITH CHECK (facility_id = tunza_current_uuid('tunza.facility_id'))"
+    )

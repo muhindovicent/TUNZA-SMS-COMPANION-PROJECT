@@ -32,7 +32,7 @@ from tunza.patients.models import (
     ProtectedEvidence,
     RegistrationIdempotency,
 )
-from tunza.patients.security import establish_patient_context
+from tunza.patients.security import establish_evidence_patient_context, establish_patient_context
 from tunza.services.encryption import decrypt_json, encrypt_json
 
 SYNTHETIC_REFERENCE = re.compile(r"^SYN-ADULT-[A-Z0-9][A-Z0-9-]{2,53}$")
@@ -848,6 +848,7 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
         return _deny_patient_access(context, "consent.record", "unavailable")
     # For grant decisions, require a valid approved notice covering the purpose,
     # matching language, and within its effective window; plus valid evidence
+    establish_evidence_patient_context(patient_id)
     notice = None
     if decision == "grant":
         if notice_version_id is None:
@@ -934,6 +935,7 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             select(ProtectedEvidence).where(
                 ProtectedEvidence.id == evidence_id,
                 ProtectedEvidence.facility_id == facility_id,
+                ProtectedEvidence.patient_id == patient_id,
             )
         )
         if evidence is None:
@@ -983,6 +985,23 @@ def record_consent_event(patient_id: UUID) -> tuple[Response, int]:
             sa.text("SELECT pg_advisory_xact_lock(:lock_id)"),
             {"lock_id": lock_id},
         )
+        existing = db.session.scalar(
+            select(ConsentEvent).where(
+                ConsentEvent.facility_id == facility_id,
+                ConsentEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            if (
+                existing.patient_id != patient_id
+                or existing.recorded_by != context.user.id
+                or existing.request_hash != request_hash
+            ):
+                db.session.rollback()
+                return _error("conflict", "The idempotency key was already used.", 409)
+            response_data = _consent_event_projection(existing)
+            db.session.commit()
+            return jsonify(data=response_data), 201
         max_sequence = db.session.scalar(
             select(sa.func.max(ConsentEvent.event_sequence)).where(
                 ConsentEvent.patient_id == patient_id,
@@ -1050,6 +1069,7 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
     if profile is None:
         return _deny_patient_access(context, "consent.read", "unavailable")
     # Evidence must belong to the same patient AND facility
+    establish_evidence_patient_context(patient_id)
     evidence = db.session.scalar(
         select(ProtectedEvidence).where(
             ProtectedEvidence.id == evidence_id,
@@ -1059,6 +1079,12 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
     )
     if evidence is None:
         return _deny_patient_access(context, "consent.read", "unavailable")
+    data = {
+        "id": str(evidence.id),
+        "media_type": evidence.media_type,
+        "recorded_by": str(evidence.recorded_by),
+        "version": evidence.version,
+    }
     try:
         _record_patient_audit(
             context=context,
@@ -1072,14 +1098,7 @@ def get_evidence(patient_id: UUID, evidence_id: UUID) -> tuple[Response, int]:
     except SQLAlchemyError:
         db.session.rollback()
         return _service_unavailable()
-    return jsonify(
-        {
-            "id": str(evidence.id),
-            "media_type": evidence.media_type,
-            "recorded_by": str(evidence.recorded_by),
-            "version": evidence.version,
-        }
-    ), 200
+    return jsonify(data=data), 200
 
 
 @blueprint.get("/<uuid:patient_id>/evidence")
@@ -1102,6 +1121,7 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "consent.read", "unavailable")
+    establish_evidence_patient_context(patient_id)
     evidence_rows = list(
         db.session.scalars(
             select(ProtectedEvidence).where(
@@ -1110,6 +1130,10 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
             )
         ).all()
     )
+    data = [
+        {"id": str(evidence.id), "media_type": evidence.media_type, "version": evidence.version}
+        for evidence in evidence_rows
+    ]
     try:
         _record_patient_audit(
             context=context,
@@ -1122,16 +1146,7 @@ def list_evidence(patient_id: UUID) -> tuple[Response, int]:
     except SQLAlchemyError:
         db.session.rollback()
         return _service_unavailable()
-    return jsonify(
-        data=[
-            {
-                "id": str(evidence.id),
-                "media_type": evidence.media_type,
-                "version": evidence.version,
-            }
-            for evidence in evidence_rows
-        ]
-    ), 200
+    return jsonify(data=data), 200
 
 
 @blueprint.post("/<uuid:patient_id>/evidence")
@@ -1191,6 +1206,7 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "consent.record", "unavailable")
+    establish_evidence_patient_context(patient_id)
     idempotency_key = _validate_idempotency_key()
     if idempotency_key is None:
         return _error("validation_failed", "A valid Idempotency-Key is required.", 422)

@@ -908,6 +908,10 @@ def _create_consent_fixtures(
                     "cipher": b"synthetic-notice-cipher",
                 },
             ).scalar_one()
+            connection.execute(
+                text("SELECT set_config('tunza.patient_id', :patient, true)"),
+                {"patient": str(patient_id) if patient_id else ""},
+            )
             evidence_id = connection.execute(
                 sa.text(
                     "INSERT INTO protected_evidence "
@@ -1088,36 +1092,20 @@ def test_cross_patient_evidence_denied(client, identity):
     _login(client, "tst.vht.a")
     facility_id = str(identity.facility_ids["TST-A"])
 
-    _register_synthetic_patient(client, facility_id, "cross-ev-a")
+    patient_a_id = _register_synthetic_patient(client, facility_id, "cross-ev-a")
     patient_b_id = _register_synthetic_patient(client, facility_id, "cross-ev-b")
 
-    with identity.app.app_context():
-        from tunza.access import load_access_context
-        from tunza.identity.models import User
-        from tunza.patients.security import establish_patient_context
-
-        user = db.session.get(User, identity.user_ids["vht_a"])
-        context = load_access_context(user)
-        establish_patient_context(context, facility_id)
-
-        # Create evidence for patient A
-        evidence_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO protected_evidence "
-                "(id, facility_id, storage_reference, digest, media_type, recorded_by, version) "
-                "VALUES (:id, :facility_id, :ref, :digest, :media_type, :recorded_by, 1) "
-                "RETURNING id"
-            ),
-            {
-                "id": uuid4(),
-                "facility_id": facility_id,
-                "ref": "evidence-for-patient-a",
-                "digest": b"digest-for-patient-a",
-                "media_type": "application/pdf",
-                "recorded_by": identity.user_ids["vht_a"],
-            },
-        )
-        db.session.commit()
+    registered = client.post(
+        f"/api/v1/patients/{patient_a_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-cross-a",
+            "digest": "a" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert registered.status_code == 201, registered.json
+    evidence_id = registered.json["data"]["id"]
 
     # Try to access patient A's evidence as patient B's reader - should fail
     # because evidence is scoped to patient A only
@@ -1653,45 +1641,46 @@ def test_consent_idempotency_different_authorised_actor_rejected(client, identit
     )
     assert response1.status_code == 201, response1.json
 
-    # Second request by vht.b with same key but different actor -> 409
-    # vht.b is temporarily given facility-scoped membership to TST-A for this test
-    client_b = identity.app.test_client()
-    _login(client_b, "tst.vht.b")
-    with identity.app.app_context():
-        from tunza.identity.models import FacilityMembership
-
-        tmp_membership = FacilityMembership(
-            user_id=identity.user_ids["vht_b"],
-            facility_id=facility_id,
-            status="active",
-            starts_at=datetime.now(UTC),
-        )
-        db.session.add(tmp_membership)
-        db.session.commit()
-        tmp_membership_id = tmp_membership.id
+    # Give the existing TST-A VHT member an individual assignment to this patient.
+    owner = create_engine(postgres_url(os.environ["TEST_MIGRATION_DATABASE_URL"]))
     try:
-        response2 = client_b.post(
-            f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
-            json={
-                "purpose": "messaging",
-                "decision": "grant",
-                "notice_version_id": str(notice_id),
-                "method": "documentary",
-                "language": "en",
-                "evidence_id": str(evidence_id),
-            },
-            headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": key},
-        )
-        assert response2.status_code == 409, response2.json
-    finally:
-        with identity.app.app_context():
-            from tunza.identity.models import FacilityMembership
-
-            db.session.execute(
-                sa.text("DELETE FROM facility_memberships WHERE id = :id"),
-                {"id": tmp_membership_id},
+        with owner.begin() as connection:
+            result = connection.execute(
+                text(
+                    "INSERT INTO participant_assignments "
+                    "(id, episode_facility_assignment_id, facility_id, "
+                    "membership_id, duty, valid_from) "
+                    "SELECT :id, efa.id, efa.facility_id, fm.id, 'primary', now() "
+                    "FROM episode_facility_assignments efa JOIN facility_memberships fm "
+                    "ON fm.facility_id = efa.facility_id "
+                    "WHERE efa.patient_id = :patient AND efa.facility_id = :facility "
+                    "AND fm.user_id = :actor AND fm.status = 'active'"
+                ),
+                {
+                    "id": uuid4(),
+                    "patient": patient_id,
+                    "facility": facility_id,
+                    "actor": identity.user_ids["multi"],
+                },
             )
-            db.session.commit()
+            assert result.rowcount == 1
+    finally:
+        owner.dispose()
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.multi")
+    response2 = client_b.post(
+        f"/api/v1/patients/{patient_id}/consent-events?facility_id={facility_id}",
+        json={
+            "purpose": "messaging",
+            "decision": "grant",
+            "notice_version_id": str(notice_id),
+            "method": "documentary",
+            "language": "en",
+            "evidence_id": str(evidence_id),
+        },
+        headers={"X-CSRF-Token": _csrf(client_b), "Idempotency-Key": key},
+    )
+    assert response2.status_code == 409, response2.json
 
 
 def test_evidence_list_unauthorized_patient_denied(client, identity):
@@ -1821,30 +1810,10 @@ def test_consent_grant_withdraw_full_flow(client, identity):
     assert ev_response.status_code == 201, ev_response.json
     evidence_id = ev_response.json["data"]["id"]
 
-    # Create consent notice via owner connection
-    notice_id = None
-    with identity.app.app_context():
-        from tunza.identity.models import User
-
-        user = db.session.get(User, identity.user_ids["vht_a"])
-        from tunza.access import load_access_context
-        from tunza.patients.security import establish_patient_context
-
-        context = load_access_context(user)
-        establish_patient_context(context, facility_id)
-        notice_id = db.session.scalar(
-            sa.text(
-                "INSERT INTO consent_notice_versions "
-                "(id, notice_code, revision, language, text_cipher, purpose_codes, "
-                "status, effective_from, effective_to, version) "
-                "VALUES (:id, 'SYN-CONSENT-FLOW', 1, 'en', :cipher, "
-                "ARRAY['messaging'], 'approved', now() - interval '1 day', "
-                "now() + interval '1 year', 1) "
-                "RETURNING id"
-            ),
-            {"id": uuid4(), "cipher": b"synthetic-notice-cipher"},
-        )
-        db.session.commit()
+    # Notice publication uses the separately privileged fixture connection.
+    notice_id, _ = _create_consent_fixtures(
+        identity.app, facility_id, identity.user_ids["vht_a"], patient_id, "FULL-FLOW"
+    )
 
     # Grant consent
     grant_response = client.post(

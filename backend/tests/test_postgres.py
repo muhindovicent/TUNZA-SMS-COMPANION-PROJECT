@@ -56,7 +56,31 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0006_patient_eligibility_consent"
+                assert revision == "0007_evidence_patient"
+            result = runner.invoke(args=["db", "downgrade", "0006_patient_eligibility_consent"])
+            assert result.exit_code == 0, result.output
+            with migration_engine.connect() as connection:
+                policies = set(
+                    connection.execute(
+                        text(
+                            "SELECT policyname FROM pg_policies "
+                            "WHERE schemaname = 'public' AND tablename = 'protected_evidence'"
+                        )
+                    ).scalars()
+                )
+                assert policies == {"protected_evidence_runtime_scope"}
+            result = runner.invoke(args=["db", "upgrade"])
+            assert result.exit_code == 0, result.output
+            with migration_engine.connect() as connection:
+                policies = set(
+                    connection.execute(
+                        text(
+                            "SELECT policyname FROM pg_policies "
+                            "WHERE schemaname = 'public' AND tablename = 'protected_evidence'"
+                        )
+                    ).scalars()
+                )
+                assert policies == {"protected_evidence_patient_scope"}
             expected_tables = {
                 "alembic_version",
                 "audit_events",
