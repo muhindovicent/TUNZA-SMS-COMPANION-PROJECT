@@ -1239,13 +1239,12 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
             return _error(
                 "conflict", "The idempotency key was already used with a different request.", 409
             )
-        return jsonify(
-            data={
-                "id": str(existing.id),
-                "media_type": existing.media_type,
-                "version": existing.version,
-            }
-        ), 201
+        response_data = {
+            "id": str(existing.id),
+            "media_type": existing.media_type,
+            "version": existing.version,
+        }
+        return jsonify(data=response_data), 201
     try:
         # Transaction-scoped advisory lock for concurrency control
         lock_id = _advisory_lock_key("evidence", patient_id, facility_id)
@@ -1268,14 +1267,13 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
             ):
                 db.session.rollback()
                 return _error("conflict", "The idempotency key was already used.", 409)
+            response_data = {
+                "id": str(existing.id),
+                "media_type": existing.media_type,
+                "version": existing.version,
+            }
             db.session.commit()
-            return jsonify(
-                data={
-                    "id": str(existing.id),
-                    "media_type": existing.media_type,
-                    "version": existing.version,
-                }
-            ), 201
+            return jsonify(data=response_data), 201
         # Reject reuse of an existing storage reference with conflicting digest or media type
         existing_ref = db.session.scalar(
             select(ProtectedEvidence).where(
@@ -1293,14 +1291,13 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
                     "digest or media type.",
                     409,
                 )
+            response_data = {
+                "id": str(existing_ref.id),
+                "media_type": existing_ref.media_type,
+                "version": existing_ref.version,
+            }
             db.session.commit()
-            return jsonify(
-                data={
-                    "id": str(existing_ref.id),
-                    "media_type": existing_ref.media_type,
-                    "version": existing_ref.version,
-                }
-            ), 201
+            return jsonify(data=response_data), 201
         evidence = ProtectedEvidence(
             id=uuid4(),
             patient_id=patient_id,
