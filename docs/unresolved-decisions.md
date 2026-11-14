@@ -34,3 +34,9 @@ The listed owners are proposed accountable stakeholder groups, not claims of nam
 ## Separate live-use decisions
 
 Technical sandbox acceptance does not approve real participant processing. Clinical/privacy approval, operational readiness, a controlled pilot decision, production messaging arrangements, and any live two-way/escalation service require explicit separate authorization.
+
+## Idempotency-retention subdecision (D14-related)
+
+| ID | Decision / evidence required | Proposed owner | Blocks |
+| --- | --- | --- | --- |
+| D14a | Idempotency key retention window for eligibility checks and consent events (replay cache TTL, purge criteria, audit interaction) | Engineering and privacy lead | Idempotency-replay safety in production |
