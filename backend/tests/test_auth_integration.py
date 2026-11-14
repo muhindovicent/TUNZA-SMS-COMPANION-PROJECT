@@ -2066,3 +2066,235 @@ def test_consent_audit_failure_rolls_back_full(client, identity, monkeypatch):
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
     )
     assert retry_response.status_code == 201, retry_response.json
+
+
+def test_evidence_idempotent_replay(client, identity):
+    """Same idempotency key + same request data returns the existing evidence (replay)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-replay")
+    key = str(uuid4())
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": key}
+
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-replay-001",
+            "digest": "a" * 64,
+            "media_type": "application/pdf",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.json
+    evidence_id = response.json["data"]["id"]
+
+    replay = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-replay-001",
+            "digest": "a" * 64,
+            "media_type": "application/pdf",
+        },
+        headers=headers,
+    )
+    assert replay.status_code == 201, replay.json
+    assert replay.json["data"]["id"] == evidence_id
+
+
+def test_evidence_idempotency_conflicting_request(client, identity):
+    """Reusing an idempotency key with different request data must be rejected (409)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-conflict")
+    key = str(uuid4())
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": key}
+
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-conflict-001",
+            "digest": "a" * 64,
+            "media_type": "application/pdf",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.json
+
+    conflicting = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-conflict-002",
+            "digest": "b" * 64,
+            "media_type": "image/png",
+        },
+        headers=headers,
+    )
+    assert conflicting.status_code == 409, conflicting.json
+
+
+def test_evidence_idempotency_concurrent_same_key(client, identity):
+    """Concurrent requests with the same idempotency key produce exactly one evidence row."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-concurrent")
+
+    key = str(uuid4())
+    csrf_a = _csrf(client)
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.a")
+    csrf_b = _csrf(client_b)
+
+    barrier = Barrier(2)
+    results = {}
+
+    def submit(client, csrf, label):
+        barrier.wait(timeout=10)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+            json={
+                "storage_reference": "synthetic-ref-concurrent-001",
+                "digest": "c" * 64,
+                "media_type": "application/pdf",
+            },
+            headers={"X-CSRF-Token": csrf, "Idempotency-Key": key},
+        )
+        results[label] = (response.status_code, response.json)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(submit, client, csrf_a, "a")
+        executor.submit(submit, client_b, csrf_b, "b")
+
+    statuses = {results[k][0] for k in results}
+    assert statuses == {201}, results
+    evidence_ids = {results[k][1]["data"]["id"] for k in results}
+    assert len(evidence_ids) == 1, f"Expected single evidence row, got {evidence_ids}"
+
+
+def test_evidence_storage_reference_conflict(client, identity):
+    """Reusing a storage reference with a different digest or media type must be rejected (409)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-ref-conflict")
+
+    response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-same-001",
+            "digest": "a" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert response.status_code == 201, response.json
+
+    conflicting_digest = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-same-001",
+            "digest": "b" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert conflicting_digest.status_code == 409, conflicting_digest.json
+
+    conflicting_media_type = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-same-001",
+            "digest": "a" * 64,
+            "media_type": "image/png",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert conflicting_media_type.status_code == 409, conflicting_media_type.json
+
+
+def test_evidence_cross_patient_isolation(client, identity):
+    """Evidence registered for Patient A must not be visible to Patient B at the same facility."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_a_id = _register_synthetic_patient(client, facility_id, "ev-isolate-a")
+    patient_b_id = _register_synthetic_patient(client, facility_id, "ev-isolate-b")
+
+    key_a = str(uuid4())
+    response_a = client.post(
+        f"/api/v1/patients/{patient_a_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-isolate-a",
+            "digest": "d" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key_a},
+    )
+    assert response_a.status_code == 201, response_a.json
+    evidence_id_a = response_a.json["data"]["id"]
+
+    key_b = str(uuid4())
+    response_b = client.post(
+        f"/api/v1/patients/{patient_b_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-isolate-b",
+            "digest": "e" * 64,
+            "media_type": "image/png",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key_b},
+    )
+    assert response_b.status_code == 201, response_b.json
+
+    list_a = client.get(
+        f"/api/v1/patients/{patient_a_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert list_a.status_code == 200
+    assert any(e["id"] == evidence_id_a for e in list_a.json["data"])
+
+    list_b = client.get(
+        f"/api/v1/patients/{patient_b_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert list_b.status_code == 200
+    assert all(e["id"] != evidence_id_a for e in list_b.json["data"])
+
+
+def test_evidence_audit_failure_rolls_back(client, identity, monkeypatch):
+    """Audit failure during evidence registration must roll back the entire transaction."""
+    import tunza.patients.routes as patient_routes
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient(client, facility_id, "ev-audit-rollback")
+
+    def fail_audit(**_kwargs):
+        raise SQLAlchemyError("synthetic audit failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(patient_routes, "_record_patient_audit", fail_audit)
+        response = client.post(
+            f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+            json={
+                "storage_reference": "synthetic-ref-audit-rollback",
+                "digest": "f" * 64,
+                "media_type": "application/pdf",
+            },
+            headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+        )
+        assert response.status_code == 503, response.json
+
+    list_response = client.get(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert list_response.status_code == 200
+    assert list_response.json["data"] == [], "No evidence should exist after audit failure rollback"
+
+    retry_response = client.post(
+        f"/api/v1/patients/{patient_id}/evidence?facility_id={facility_id}",
+        json={
+            "storage_reference": "synthetic-ref-audit-rollback",
+            "digest": "f" * 64,
+            "media_type": "application/pdf",
+        },
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
+    )
+    assert retry_response.status_code == 201, retry_response.json

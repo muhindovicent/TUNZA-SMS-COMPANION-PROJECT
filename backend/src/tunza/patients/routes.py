@@ -1206,19 +1206,39 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
     )
     if profile is None:
         return _deny_patient_access(context, "consent.record", "unavailable")
-    establish_evidence_patient_context(patient_id)
     idempotency_key = _validate_idempotency_key()
     if idempotency_key is None:
         return _error("validation_failed", "A valid Idempotency-Key is required.", 422)
-    # Idempotency: check if evidence with same storage reference already exists
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "patient_id": str(patient_id),
+                "facility_id": str(facility_id),
+                "storage_reference": storage_reference,
+                "digest": digest,
+                "media_type": media_type,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).digest()
+    establish_evidence_patient_context(patient_id)
+    # Idempotency: bind key to actor, patient, facility, operation, request fingerprint
     existing = db.session.scalar(
         select(ProtectedEvidence).where(
-            ProtectedEvidence.patient_id == patient_id,
             ProtectedEvidence.facility_id == facility_id,
-            ProtectedEvidence.storage_reference == storage_reference,
+            ProtectedEvidence.idempotency_key == idempotency_key,
         )
     )
     if existing is not None:
+        if (
+            existing.patient_id != patient_id
+            or existing.recorded_by != context.user.id
+            or existing.request_hash != request_hash
+        ):
+            return _error(
+                "conflict", "The idempotency key was already used with a different request.", 409
+            )
         return jsonify(
             data={
                 "id": str(existing.id),
@@ -1227,14 +1247,71 @@ def register_evidence(patient_id: UUID) -> tuple[Response, int]:
             }
         ), 201
     try:
+        # Transaction-scoped advisory lock for concurrency control
+        lock_id = _advisory_lock_key("evidence", patient_id, facility_id)
+        db.session.execute(
+            sa.text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": lock_id},
+        )
+        # Re-check idempotency under lock
+        existing = db.session.scalar(
+            select(ProtectedEvidence).where(
+                ProtectedEvidence.facility_id == facility_id,
+                ProtectedEvidence.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            if (
+                existing.patient_id != patient_id
+                or existing.recorded_by != context.user.id
+                or existing.request_hash != request_hash
+            ):
+                db.session.rollback()
+                return _error("conflict", "The idempotency key was already used.", 409)
+            db.session.commit()
+            return jsonify(
+                data={
+                    "id": str(existing.id),
+                    "media_type": existing.media_type,
+                    "version": existing.version,
+                }
+            ), 201
+        # Reject reuse of an existing storage reference with conflicting digest or media type
+        existing_ref = db.session.scalar(
+            select(ProtectedEvidence).where(
+                ProtectedEvidence.patient_id == patient_id,
+                ProtectedEvidence.facility_id == facility_id,
+                ProtectedEvidence.storage_reference == storage_reference,
+            )
+        )
+        if existing_ref is not None:
+            if existing_ref.digest != digest_bytes or existing_ref.media_type != media_type:
+                db.session.rollback()
+                return _error(
+                    "conflict",
+                    "The storage reference is already registered with a different "
+                    "digest or media type.",
+                    409,
+                )
+            db.session.commit()
+            return jsonify(
+                data={
+                    "id": str(existing_ref.id),
+                    "media_type": existing_ref.media_type,
+                    "version": existing_ref.version,
+                }
+            ), 201
         evidence = ProtectedEvidence(
             id=uuid4(),
             patient_id=patient_id,
             facility_id=facility_id,
             storage_reference=storage_reference,
-            digest=bytes.fromhex(digest),
+            digest=digest_bytes,
             media_type=media_type,
             recorded_by=context.user.id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            key_version=current_app.config["PATIENT_KEY_VERSION"],
         )
         db.session.add(evidence)
         _record_patient_audit(

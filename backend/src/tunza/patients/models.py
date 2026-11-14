@@ -248,6 +248,18 @@ class ProtectedEvidence(db.Model):
     __table_args__ = (
         UniqueConstraint("id", "facility_id", name="uq_protected_evidence_id_facility"),
         UniqueConstraint("patient_id", "id", name="uq_protected_evidence_patient_id"),
+        UniqueConstraint(
+            "facility_id",
+            "idempotency_key",
+            name="uq_protected_evidence_facility_idempotency_key",
+        ),
+        UniqueConstraint(
+            "patient_id",
+            "facility_id",
+            "storage_reference",
+            name="uq_protected_evidence_patient_facility_storage_reference",
+        ),
+        CheckConstraint("version > 0", name="ck_protected_evidence_version_positive"),
         {"implicit_returning": False},
     )
 
@@ -280,6 +292,9 @@ class ProtectedEvidence(db.Model):
         ForeignKey("users.id", ondelete="RESTRICT", name="fk_protected_evidence_recorded_by_users"),
         nullable=False,
     )
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -26,6 +26,13 @@ not represent approved clinical or legal policy.
   for an assigned patient
 - `POST /patients/{id}/consent-events` (`consent.record` / `consent.withdraw`)
   — record a consent grant, withdrawal, or correction
+- `POST /patients/{id}/evidence` (`consent.record`) — register protected evidence
+  for an assigned synthetic patient with durable idempotency. Each idempotency key
+  is bound to the original actor, patient, facility, operation, and request fingerprint.
+  Key reuse with conflicting request data is rejected with `409`. Duplicate storage
+  references are blocked by a PostgreSQL uniqueness constraint; reuse with a conflicting
+  SHA-256 digest or media type is also rejected with `409`. Concurrent registrations
+  are serialized with a transaction-scoped PostgreSQL advisory lock.
 - `GET /patients/{id}/evidence/{evidence_id}` (`consent.read` /
   `eligibility.record`) — access protected evidence for an authorized patient
 
@@ -38,6 +45,20 @@ not represent approved clinical or legal policy.
 - RLS policies restrict access to the actor's current facility
 - Audit events record all eligibility and consent operations atomically with
   the mutation
+
+## Idempotency
+
+- `POST /patients/{id}/evidence` uses durable idempotency keyed on
+  `(facility_id, idempotency_key)`. The key is bound to the actor, patient,
+  facility, operation, and full request fingerprint (storage reference, digest,
+  media type).
+- Reusing an idempotency key with a different request body returns `409 conflict`.
+- A unique constraint on `(patient_id, facility_id, storage_reference)` prevents
+  duplicate evidence references; reuse of an existing storage reference with a
+  conflicting SHA-256 digest or media type returns `409 conflict`.
+- Concurrent registrations with the same key are serialized via a
+  transaction-scoped `pg_advisory_xact_lock`, guaranteeing exactly one row.
+- Audit failures roll back the entire transaction atomically.
 
 ## Messaging eligibility
 
