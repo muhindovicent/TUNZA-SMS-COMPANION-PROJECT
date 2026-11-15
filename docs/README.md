@@ -30,6 +30,9 @@ For the opt-in fixture workflow and its unresolved D04/D09 boundaries, see
 For append-only completion and auditable lifecycle closure, see
 [Phase 4B — pregnancy completion](phase-4b-pregnancy-completion.md).
 
+For synthetic authoring, independent technical review and publication controls, see
+[Phase 5A — clinical-content management](phase-5a-clinical-content.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)

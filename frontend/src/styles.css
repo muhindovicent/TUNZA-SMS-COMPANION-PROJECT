@@ -173,3 +173,10 @@ h3 { font-size: 17px; margin: 0; font-weight: 650; }
 .completion-confirmation { border: 1px solid #cddcd5; border-radius: .5rem; padding: 1rem; margin-block: 1rem; }
 .completion-history { display: grid; gap: 1rem; padding-inline-start: 1.5rem; overflow-wrap: anywhere; }
 .completion-panel input, .completion-panel textarea { max-width: 100%; min-width: 0; }
+.content-management { padding-block: 1.5rem; min-width: 0; }
+.content-form, .content-filters { display: grid; gap: 1rem; margin-block: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.content-form h2, .content-form output { grid-column: 1 / -1; }
+.content-form output, .content-version code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.content-list { display: grid; gap: 1rem; margin-block: 1rem; }
+.content-list article, .content-version { padding: 1rem; border: 1px solid #cddcd5; border-radius: .5rem; overflow-wrap: anywhere; }
+.content-management input, .content-management select { max-width: 100%; min-width: 0; }

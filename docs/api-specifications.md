@@ -252,6 +252,19 @@ Approved notice and ANC source artifacts are controlled configuration inputs wit
 
 ## 7. Content and messaging contracts
 
+**Implemented Phase 5A fixture subset:** see [clinical-content management](phase-5a-clinical-content.md).
+Template metadata is immutable and limited to antenatal weekly/reminder slots.
+Text must match a fixed synthetic label, `allowed_parameters` is exactly `[]`, and
+review/action reasons are synthetic codes. Every response reports no clinical
+sign-off or dispatch eligibility while D07 remains unresolved. Review returns the
+updated ContentVersion with its immutable decision, not a separate mutable record.
+Writes require Idempotency-Key; version creation uses the template ETag, while
+draft edits and lifecycle actions use the version ETag. GET `/message-templates/{id}`,
+GET `/template-versions` and GET `/template-versions/{id}/events` supplement the
+contracts below. Version lists support `template_id`, `language`, `state`, `limit`
+and actor/filter-bound signed cursors. Escalation and messaging routes remain future
+contracts.
+
 | Method / path | Permission | Body -> result |
 | --- | --- | --- |
 | GET/POST `/message-templates` | `content.read` / `content.author` | Filtered corpus / TemplateInput -> 201 template |

@@ -475,8 +475,13 @@ Global endpoint uniqueness means one restricted row per normalized destination; 
 The additive implementation in migration `0010_anc_appointments` is documented in
 [Phase 3B](phase-3b-anc-appointments.md). It adds facility/episode-scoped bookings,
 encrypted append-only events and encrypted command replay, with database-enforced
-transitions, replacement uniqueness and FORCE RLS. Reference schedules, patient
-SMS responses and content/messaging tables below remain draft future contracts.
+transitions, replacement uniqueness and FORCE RLS. Migration `0014_clinical_content`
+adds the synthetic-only template/version subset, plus `content_reviews`,
+`content_events` and `content_idempotency`; see [Phase 5A](phase-5a-clinical-content.md)
+for its concrete dictionary and constraints. `content_reviews` intentionally records
+technical fixture decisions with `clinical_signoff = false`; the draft
+`clinical_approvals` table below is not implemented. Reference schedules, patient
+SMS responses, escalation and messaging tables remain future contracts.
 
 | Entity | Additional columns / references | Keys and checks |
 | --- | --- | --- |
