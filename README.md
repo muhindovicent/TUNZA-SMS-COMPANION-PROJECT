@@ -4,7 +4,7 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Feature-branch milestone: Phase 4A — controlled synthetic facility transfers.** The existing registry, consent, pregnancy and appointment workflows are preserved. Transfers are an explicitly enabled fixture demonstration, disabled by default and unavailable in production while D04/D09 remain unresolved. All development and verification use synthetic data exclusively. See the [Phase 4A implementation and policy-boundary guide](docs/phase-4a-controlled-transfers.md).
+**Feature-branch milestone: Phase 4A — controlled synthetic facility transfers.** The existing registry, consent, pregnancy and appointment workflows are preserved. Transfers are disabled by default and unavailable in production while D04/D09 remain unresolved. Fixture execution requires a separately authenticated non-production database login; the standard runtime has no fixture execution privilege. All development and verification use synthetic data exclusively. See the [Phase 4A implementation and policy-boundary guide](docs/phase-4a-controlled-transfers.md).
 
 **Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md) · [Phase 1B-1 authentication guide](docs/phase-1b-1-authentication.md).
 

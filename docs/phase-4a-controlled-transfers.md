@@ -17,10 +17,14 @@ no new role grants or approved transfer-policy defaults are introduced.
 - `SYNTHETIC_TRANSFERS_ENABLED=false` by default. Authenticated capabilities report
   `live_enabled:false`; disabled mutations and metadata reads return `403
   policy_unconfigured` before accessing transfer data.
-- A local synthetic demonstration may explicitly set the flag to `true` with
-  `APP_ENV=development` or `testing`. The UI has no policy-enabling switch.
-- Production configuration rejects enabling this flag. The API also independently
-  refuses transfer operations in production. Live transfer operations stay disabled.
+- A local synthetic demonstration requires both an explicitly enabled flag and
+  a **separately authenticated fixture database login**, provisioned as described
+  below. An environment flag or caller-set PostgreSQL variable alone is insufficient.
+  The UI has no policy-enabling switch.
+- Production configuration rejects enabling this flag or using fixture database
+  credentials, even with the flag disabled. The standard `tunza_runtime` database
+  role has no transfer-table access or EXECUTE privilege on the fixture entry points.
+  Live transfer operations stay disabled.
 - Only existing synthetic profiles and active facilities whose technical codes
   begin with `SYN` or `TST` are supported. This prefix is a fixture identifier,
   not a clinical/facility approval.
@@ -155,16 +159,93 @@ the destination for accept/reject and by the source for cancellation. A source
 care role cannot directly SELECT a destination decision. The runtime role receives
 no general responsibility/profile UPDATE or cross-facility chart access.
 
-The sole cross-facility write capability is the fixed-signature
-`tunza_synthetic_transfer_decide` function. It accepts no actor or scope overrides:
-these come from verified transaction-local context, then are rechecked against
-actual grants and the named destination. The function uses a fixed
-`pg_catalog, public, pg_temp` search path, schema-qualified tables, a separate
-privileged migration owner and limited runtime EXECUTE. PUBLIC execution is
-revoked. It returns only a decision ID; it is not a general cross-tenant query
-interface. Its `row_security=off` setting fails closed if the separately privileged
-function owner cannot perform the bounded operation; the application runtime must
-never be made an owner or given BYPASSRLS to work around this.
+### Security correction: migration `0012_fixture_execution_boundary`
+
+The original 0011 grant allowed the standard database service login to call the
+privileged function after setting its own session variables. Flask's production
+flag could not secure that direct-SQL path. Migration 0012 removes this capability:
+
+- All non-owner EXECUTE grants are stripped from the old implementation, including
+  unexpected existing grantees. PUBLIC and `tunza_runtime` cannot execute it.
+- The implementation becomes the owner-only **SECURITY INVOKER** worker
+  `tunza_synthetic_transfer_apply_private`. It has no standalone definer authority
+  and is not executable by either application login.
+- The fixed-signature `tunza_synthetic_transfer_decide` wrapper retains the narrow
+  SECURITY DEFINER boundary and checks authenticated `session_user` equals
+  `tunza_fixture_runtime` and the actual database name matches
+  `^tunza_[a-z0-9_]+_(test|synthetic)$`. These identities are not caller-settable
+  environment GUCs, and `SET ROLE` cannot change `session_user`.
+- Normal upgrades create no fixture login and grant no application role fixture
+  execution. Transfer-table and helper-function grants are also removed from the
+  standard runtime; production does not need fixture metadata privileges.
+- Downgrade does **not** automatically restore the unsafe runtime grants. It
+  returns the previous function name/schema with owner-only access. An isolated
+  fixture must be explicitly reprovisioned after re-upgrading.
+- Existing connection verification still rejects superusers, BYPASSRLS, ownership,
+  CREATE privileges and **all role memberships**. It additionally fails closed
+  if an ordinary runtime login can execute either transfer entry point, or if a
+  fixture login can execute the private worker.
+
+The wrapper accepts no actor/scope overrides and delegates to the existing atomic
+implementation only after its database-principal guard. Logical staff identity,
+current grants, destination and pending/version checks still occur inside that
+implementation. Fixed `pg_catalog, public, pg_temp` search paths and schema-qualified
+queries are retained. Only a bounded decision ID is returned; no general cross-tenant
+query is exposed. No RLS policy, audit transaction or application encryption control
+is relaxed.
+
+### Owner-only fixture provisioning
+
+Use a **separate isolated loopback database** named `tunza_…_test` or
+`tunza_…_synthetic`, never a production database/cluster. Apply migrations through
+the existing separate owner connection first, then explicitly run:
+
+```text
+python -m tunza.fixture_database
+```
+
+The command reads `APP_ENV` and `MIGRATION_DATABASE_URL`. It refuses production,
+non-loopback or non-fixture database targets and standard/fixture application
+credentials. It also checks the authenticated database provisioner's actual
+owner/superuser authority; changing the environment string cannot confer that.
+
+It provisions `tunza_fixture_runtime` as a non-owner login with NOSUPERUSER,
+NOBYPASSRLS, NOINHERIT, NOCREATEDB, NOCREATEROLE, NOREPLICATION and **no memberships**.
+Base table/column DML ACLs are mirrored directly, retaining narrow UPDATE grants;
+only the required RLS helper functions and fixture tables/wrapper are added. There
+is no schema CREATE, function ownership, private-worker EXECUTE or grant option.
+No password is copied, generated or printed. Supply separate fixture authentication
+through PostgreSQL provisioning; passwordless trust is confined to the disposable
+loopback CI/test service, not an application credential fallback.
+
+Run the fixture application with all of:
+
+```text
+APP_ENV=development (or testing)
+DATABASE_URL=<separate tunza_fixture_runtime credentials for the isolated fixture DB>
+DATABASE_RUNTIME_ROLE=tunza_fixture_runtime
+SYNTHETIC_TRANSFERS_ENABLED=true
+```
+
+CI and local integration tests use `TEST_FIXTURE_DATABASE_URL` for this separate
+login, while the normal suites retain `TEST_DATABASE_URL` as `tunza_runtime`.
+Fixture setup uses the owner only for migrations/provisioning, then runs **all
+application operations through the restricted fixture login**, on the same database
+transaction as audit and idempotency writes. There is no second privileged API
+connection that could commit reassignment independently of audit rollback.
+
+### Remaining trust limits
+
+The isolated fixture login intentionally carries fixture-transfer capability. A
+holder of that credential can set the logical actor/facility context for that
+synthetic database; it must never be distributed as a production credential.
+Database naming supplements isolation but is not external attestation that data
+is synthetic. Trusted provisioning and separate infrastructure remain necessary.
+Database owners/superusers can change grants, owners or session authorization and
+are outside the ordinary-runtime threat model. Application-set RLS context is
+still trusted for logical staff identity, as documented in the existing security
+contract; this correction is not a general defense against DB-owner or ordinary
+application-credential compromise.
 
 Command-key advisory locks precede pregnancy/request/responsibility locks.
 Concurrent identical commands replay one result; competing decisions at one
@@ -185,12 +266,20 @@ history, overlap rejection and pooled-context reset.
 Locked dependencies on a dedicated loopback PostgreSQL 18 database, Python 3.15.1
 and Node 24:
 
-- **246 backend tests passed**, no failures or skips, including the original
+- **264 backend tests passed**, no failures or skips, including the original
   appointment/pregnancy/authentication suites and populated migration round-trips.
 - **81 frontend tests passed across 12 files**, plus TypeScript, ESLint, coverage
   and production build.
 - Ruff lint/format, `pip check`, `npm ci` and `npm audit` passed; npm reported zero
   vulnerabilities.
+
+Direct SQL regressions cover standard runtime accept/reject/cancel attempts with
+valid forged actor/facility/mode GUCs, SET ROLE/session-authorization denial,
+private-worker denial for both application logins, accidental EXECUTE grants,
+flag-only API attempts and migration revocation of the legacy grant without data
+loss. Original acceptance, atomicity, source/destination isolation, replay and
+audit-rollback regressions continue through the separately authenticated fixture
+login. The security downgrade does not restore the original vulnerability.
 
 The PR reports the independent GitHub Actions result on Linux/Python 3.14 and
 PostgreSQL 18. Technical fixture acceptance does not resolve D04/D09 approval or

@@ -71,6 +71,8 @@ jobs:
       MIGRATION_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
       TEST_DATABASE_URL: postgresql+psycopg://tunza_runtime@127.0.0.1:5432/tunza_ci_test
       TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://tunza_ci@127.0.0.1:5432/tunza_ci_test
+      # Separate login is owner-provisioned only in the isolated synthetic test DB.
+      TEST_FIXTURE_DATABASE_URL: postgresql+psycopg://tunza_fixture_runtime@127.0.0.1:5432/tunza_ci_test
     services:
       postgres:
         image: postgres:18

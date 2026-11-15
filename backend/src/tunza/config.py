@@ -116,6 +116,10 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         )
 
     database_url = postgres_url(values.get("DATABASE_URL"))
+    if environment == "production" and (
+        runtime_role == "tunza_fixture_runtime" or database_url.username == "tunza_fixture_runtime"
+    ):
+        raise ConfigurationError("The fixture database principal cannot be used in production.")
     migration_url = values.get("MIGRATION_DATABASE_URL")
     connect_timeout = _integer(
         values.get("DATABASE_CONNECT_TIMEOUT", 3), "DATABASE_CONNECT_TIMEOUT", 1, 30

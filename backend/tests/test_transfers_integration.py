@@ -1,28 +1,90 @@
 """A08 fixture acceptance, bounded handover, isolation and transaction safety."""
 
 import os
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from test_auth_integration import PASSWORD, _csrf, _login
 from test_auth_integration import _fresh_rate_limiter as _fresh_rate_limiter
 from test_auth_integration import identity as identity
-from test_auth_integration import identity_app as identity_app
 from test_pregnancy_integration import care_staff as care_staff
 from test_pregnancy_integration import owner as owner
 from test_pregnancy_integration import pregnancy as pregnancy
 
+from tunza import create_app
 from tunza.config import postgres_url
 from tunza.extensions import db
+from tunza.fixture_database import DECIDE, FIXTURE_ROLE, PRIVATE, provision_fixture_role
 from tunza.identity.models import FacilityMembership, Role, RoleBinding, User
 from tunza.identity.passwords import hash_password
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(scope="module")
+def identity_app():
+    """Fixture transfers authenticate with a separate, non-inheriting DB login.
+
+    All other integration modules keep testing the standard runtime principal.
+    Owner credentials are used only for schema/provisioning, never by the app.
+    """
+    base_value = os.environ.get("TEST_DATABASE_URL")
+    if not base_value:
+        pytest.skip("Dedicated disposable PostgreSQL test URLs are required.")
+    owner_value = os.environ.get("TEST_MIGRATION_DATABASE_URL")
+    fixture_value = os.environ.get("TEST_FIXTURE_DATABASE_URL")
+    assert owner_value and fixture_value, "Set owner and separate TEST_FIXTURE_DATABASE_URL logins."
+    base, owner_url, fixture = (
+        postgres_url(value) for value in (base_value, owner_value, fixture_value)
+    )
+    assert base.host in {"127.0.0.1", "localhost", "::1"}
+    assert base.database.startswith("tunza_") and base.database.endswith("_test")
+    assert fixture.username == FIXTURE_ROLE
+    assert owner_url.username not in {base.username, FIXTURE_ROLE}
+    assert (fixture.host, fixture.port, fixture.database) == (base.host, base.port, base.database)
+    assert (owner_url.host, owner_url.port, owner_url.database) == (
+        base.host,
+        base.port,
+        base.database,
+    )
+    settings = {
+        "APP_ENV": "testing",
+        "SECRET_KEY": secrets.token_urlsafe(48),
+        "DATABASE_URL": base_value,
+        "MIGRATION_DATABASE_URL": owner_value,
+        "SESSION_COOKIE_SECURE": False,
+    }
+    bootstrap = create_app(settings)
+    runner = bootstrap.test_cli_runner()
+    with bootstrap.app_context():
+        if inspect(db.engine).has_table("alembic_version"):
+            result = runner.invoke(args=["db", "downgrade", "base"])
+            assert result.exit_code == 0, result.output
+        result = runner.invoke(args=["db", "upgrade"])
+        assert result.exit_code == 0, result.output
+        db.session.remove()
+        db.engine.dispose()
+    provision_fixture_role(owner_value, environment="testing")
+    application = create_app(
+        {
+            **settings,
+            "DATABASE_URL": fixture_value,
+            "DATABASE_RUNTIME_ROLE": FIXTURE_ROLE,
+            "SYNTHETIC_TRANSFERS_ENABLED": True,
+        }
+    )
+    yield application
+    with application.app_context():
+        db.session.remove()
+        result = application.test_cli_runner().invoke(args=["db", "downgrade", "base"])
+        assert result.exit_code == 0, result.output
+        db.engine.dispose()
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -790,6 +852,13 @@ def test_rls_definer_boundaries_immutable_history_and_no_overlap(pregnancy, iden
             )
         ).one()
         assert procedure.prosecdef and "row_security=off" in procedure.proconfig
+        assert (
+            connection.scalar(
+                text("SELECT prosecdef FROM pg_proc WHERE oid = CAST(:function AS regprocedure)"),
+                {"function": PRIVATE},
+            )
+            is False
+        )
         assert any(
             "search_path=pg_catalog, public, pg_temp" == setting for setting in procedure.proconfig
         )
@@ -803,7 +872,7 @@ def test_rls_definer_boundaries_immutable_history_and_no_overlap(pregnancy, iden
             == 0
         )
     runtime = create_engine(
-        postgres_url(os.environ["TEST_DATABASE_URL"]), pool_size=1, max_overflow=0
+        postgres_url(os.environ["TEST_FIXTURE_DATABASE_URL"]), pool_size=1, max_overflow=0
     )
     try:
         for user in (None, other_actor):
@@ -891,3 +960,279 @@ def test_rls_definer_boundaries_immutable_history_and_no_overlap(pregnancy, iden
             assert connection.scalar(text("SELECT count(*) FROM facility_transfers")) == 0
     finally:
         runtime.dispose()
+
+
+def _valid_sql_decision(p, identity, owner, row, outcome="accepted"):
+    login = "stab.hcw" if outcome == "cancelled" else "transfer.fa.b"
+    with owner.connect() as connection:
+        actor_id = connection.scalar(
+            text("SELECT id FROM users WHERE login_identifier = :login"), {"login": login}
+        )
+        member = connection.scalar(
+            text(
+                "SELECT m.id FROM facility_memberships m JOIN users u ON u.id = m.user_id "
+                "WHERE u.login_identifier = 'stab.cross' AND m.facility_id = :facility"
+            ),
+            {"facility": row["destination_facility_id"]},
+        )
+    with identity.app.app_context():
+        from tunza.transfers.routes import _crypt
+
+        cipher = _crypt({}, "patient-demographics")
+    return {
+        "id": row["id"],
+        "version": 1,
+        "outcome": outcome,
+        "reason": "SYN-SECURITY-REVIEW",
+        "receiver": member if outcome == "accepted" else None,
+        "language": "lg" if outcome == "accepted" else None,
+        "cipher": cipher,
+        "key_version": identity.app.config["PATIENT_KEY_VERSION"],
+        "actor": str(actor_id),
+        "facility": p.facility if outcome == "cancelled" else row["destination_facility_id"],
+    }
+
+
+def _spoof_mode(connection, parameters):
+    connection.execute(
+        text(
+            "SELECT set_config('tunza.actor_id', :actor, true), "
+            "set_config('tunza.facility_id', :facility, true), "
+            "set_config('tunza.synthetic_transfers','on',true), "
+            "set_config('tunza.app_env','testing',true), "
+            "set_config('tunza.fixture_authorized','true',true)"
+        ),
+        parameters,
+    )
+
+
+SQL_DECIDE = """SELECT public.tunza_synthetic_transfer_decide(
+    :id,:version,:outcome,:reason,:receiver,:language,:cipher,:key_version)"""
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "cancelled"])
+def test_standard_runtime_cannot_bypass_production_gate_with_forged_gucs(
+    pregnancy, identity, owner, outcome
+):
+    p = pregnancy
+    row = requested(p, identity)
+    parameters = _valid_sql_decision(p, identity, owner, row, outcome)
+    standard = create_engine(postgres_url(os.environ["TEST_DATABASE_URL"]))
+    try:
+        with standard.connect() as connection:
+            assert connection.scalar(text("SELECT session_user")) == "tunza_runtime"
+            assert (
+                connection.scalar(
+                    text("SELECT has_function_privilege(current_user,:function,'EXECUTE')"),
+                    {"function": DECIDE},
+                )
+                is False
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT has_function_privilege(current_user,:function,'EXECUTE')"),
+                    {"function": PRIVATE},
+                )
+                is False
+            )
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT has_table_privilege(current_user,"
+                        "'public.facility_transfers','INSERT')"
+                    )
+                )
+                is False
+            )
+        with pytest.raises(DBAPIError) as denied, standard.begin() as connection:
+            _spoof_mode(connection, parameters)
+            connection.execute(text(SQL_DECIDE), parameters)
+        assert denied.value.orig.sqlstate == "42501"
+        with owner.connect() as connection:
+            assert (
+                connection.scalar(
+                    text("SELECT state FROM facility_transfers WHERE id = :id"), parameters
+                )
+                == "pending"
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT count(*) FROM transfer_decisions WHERE transfer_id = :id"),
+                    parameters,
+                )
+                == 0
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT count(*) FROM facility_patient_profiles WHERE patient_id = :id"),
+                    {"id": p.patient},
+                )
+                == 1
+            )
+    finally:
+        standard.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["SET ROLE tunza_fixture_runtime", "SET SESSION AUTHORIZATION tunza_fixture_runtime"],
+)
+def test_standard_runtime_cannot_assume_fixture_login(statement, pregnancy):
+    standard = create_engine(postgres_url(os.environ["TEST_DATABASE_URL"]))
+    try:
+        with pytest.raises(DBAPIError) as denied, standard.begin() as connection:
+            connection.execute(text(statement))
+        assert denied.value.orig.sqlstate == "42501"
+    finally:
+        standard.dispose()
+
+
+@pytest.mark.parametrize("url_variable", ["TEST_DATABASE_URL", "TEST_FIXTURE_DATABASE_URL"])
+def test_private_transfer_worker_is_not_executable_by_application_logins(
+    pregnancy, identity, owner, url_variable
+):
+    p = pregnancy
+    row = requested(p, identity)
+    parameters = _valid_sql_decision(p, identity, owner, row)
+    application = create_engine(postgres_url(os.environ[url_variable]))
+    try:
+        with pytest.raises(DBAPIError) as denied, application.begin() as connection:
+            _spoof_mode(connection, parameters)
+            connection.execute(
+                text(
+                    SQL_DECIDE.replace(
+                        "tunza_synthetic_transfer_decide", "tunza_synthetic_transfer_apply_private"
+                    )
+                ),
+                parameters,
+            )
+        assert denied.value.orig.sqlstate == "42501"
+    finally:
+        application.dispose()
+
+
+@pytest.mark.parametrize("entry", [DECIDE, PRIVATE])
+def test_boundary_survives_accidental_execute_grant(pregnancy, identity, owner, entry):
+    p = pregnancy
+    row = requested(p, identity)
+    parameters = _valid_sql_decision(p, identity, owner, row)
+    standard = create_engine(postgres_url(os.environ["TEST_DATABASE_URL"]))
+    with owner.begin() as connection:
+        connection.execute(text(f"GRANT EXECUTE ON FUNCTION {entry} TO tunza_runtime"))
+    try:
+        with pytest.raises(DBAPIError) as denied, standard.begin() as connection:
+            _spoof_mode(connection, parameters)
+            sql = (
+                SQL_DECIDE
+                if entry == DECIDE
+                else SQL_DECIDE.replace(
+                    "tunza_synthetic_transfer_decide", "tunza_synthetic_transfer_apply_private"
+                )
+            )
+            connection.execute(text(sql), parameters)
+        assert denied.value.orig.sqlstate == "42501"
+        if entry == DECIDE:
+            assert "Fixture execution principal required" in str(denied.value.orig)
+        probe = create_app(
+            {
+                "APP_ENV": "testing",
+                "SECRET_KEY": secrets.token_urlsafe(48),
+                "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
+                "MIGRATION_DATABASE_URL": os.environ["TEST_MIGRATION_DATABASE_URL"],
+            }
+        )
+        with probe.app_context():
+            with pytest.raises(RuntimeError, match="unsafe fixture execution capability"):
+                db.engine.connect()
+            db.engine.dispose()
+    finally:
+        with owner.begin() as connection:
+            connection.execute(text(f"REVOKE ALL ON FUNCTION {entry} FROM tunza_runtime"))
+        standard.dispose()
+
+
+def test_enabling_flask_flag_does_not_authorize_standard_runtime(pregnancy, identity, owner):
+    p = pregnancy
+    row = requested(p, identity)
+    application = create_app(
+        {
+            "APP_ENV": "testing",
+            "SECRET_KEY": identity.app.config["SECRET_KEY"],
+            "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
+            "MIGRATION_DATABASE_URL": os.environ["TEST_MIGRATION_DATABASE_URL"],
+            "SESSION_COOKIE_SECURE": False,
+            "SYNTHETIC_TRANSFERS_ENABLED": True,
+        }
+    )
+    try:
+        client = application.test_client()
+        _login(client, "transfer.fa.b")
+        assert (
+            client.get("/api/v1/transfers/capabilities").json["data"]["synthetic_enabled"] is False
+        )
+        response = decision(p, identity, owner, row, choice="reject", client=client)
+        assert (
+            response.status_code == 403 and response.json["error"]["code"] == "policy_unconfigured"
+        )
+    finally:
+        with application.app_context():
+            db.session.remove()
+            db.engine.dispose()
+
+
+def test_security_upgrade_revokes_legacy_grants_without_altering_transfer_data(
+    pregnancy, identity, owner
+):
+    p = pregnancy
+    row = requested(p, identity)
+    bootstrap = create_app(
+        {
+            "APP_ENV": "testing",
+            "SECRET_KEY": secrets.token_urlsafe(48),
+            "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
+            "MIGRATION_DATABASE_URL": os.environ["TEST_MIGRATION_DATABASE_URL"],
+        }
+    )
+    runner = bootstrap.test_cli_runner()
+    try:
+        down = runner.invoke(args=["db", "downgrade", "0011_controlled_transfers"])
+        assert down.exit_code == 0, down.output
+        with owner.begin() as connection:
+            # Downgrades must not automatically reopen the original vulnerability.
+            assert (
+                connection.scalar(
+                    text("SELECT has_function_privilege('tunza_runtime',:function,'EXECUTE')"),
+                    {"function": DECIDE},
+                )
+                is False
+            )
+            connection.execute(text(f"GRANT EXECUTE ON FUNCTION {DECIDE} TO tunza_runtime"))
+        upgraded = runner.invoke(args=["db", "upgrade"])
+        assert upgraded.exit_code == 0, upgraded.output
+        with owner.connect() as connection:
+            assert (
+                connection.scalar(
+                    text("SELECT has_function_privilege('tunza_runtime',:function,'EXECUTE')"),
+                    {"function": DECIDE},
+                )
+                is False
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT has_function_privilege('tunza_runtime',:function,'EXECUTE')"),
+                    {"function": PRIVATE},
+                )
+                is False
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT state FROM facility_transfers WHERE id = :id"), {"id": row["id"]}
+                )
+                == "pending"
+            )
+        provision_fixture_role(os.environ["TEST_MIGRATION_DATABASE_URL"], environment="testing")
+        assert decision(p, identity, owner, row).status_code == 200
+    finally:
+        with bootstrap.app_context():
+            db.session.remove()
+            db.engine.dispose()

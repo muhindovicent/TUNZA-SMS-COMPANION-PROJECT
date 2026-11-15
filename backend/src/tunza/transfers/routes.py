@@ -39,6 +39,8 @@ def _enabled():
     return (
         current_app.config["APP_ENV"] in {"testing", "development"}
         and current_app.config["SYNTHETIC_TRANSFERS_ENABLED"]
+        and current_app.config["DATABASE_RUNTIME_ROLE"] == "tunza_fixture_runtime"
+        and current_app.config["SQLALCHEMY_DATABASE_URI"].username == "tunza_fixture_runtime"
     )
 
 

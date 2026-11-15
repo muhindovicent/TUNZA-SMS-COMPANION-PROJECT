@@ -49,5 +49,25 @@ def register_runtime_role(app: Flask) -> None:
                     raise RuntimeError(
                         "Runtime database login does not satisfy security requirements."
                     )
+                cursor.execute("""
+                    SELECT p.proname, has_function_privilege(session_user, p.oid, 'EXECUTE')
+                    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = 'public' AND p.oid IN (
+                        to_regprocedure('public.tunza_synthetic_transfer_decide(uuid,integer,text,text,uuid,text,bytea,text)'),
+                        to_regprocedure('public.tunza_synthetic_transfer_apply_private(uuid,integer,text,text,uuid,text,bytea,text)'))
+                """)
+                execution = dict(cursor.fetchall())
+                if role == "tunza_fixture_runtime":
+                    permitted = (
+                        app.config["APP_ENV"] in {"testing", "development"}
+                        and execution.get("tunza_synthetic_transfer_decide") is True
+                        and execution.get("tunza_synthetic_transfer_apply_private") is False
+                    )
+                else:
+                    permitted = not any(execution.values())
+                if not permitted:
+                    raise RuntimeError(
+                        "Runtime database login has an unsafe fixture execution capability."
+                    )
         finally:
             dbapi_connection.autocommit = previous_autocommit

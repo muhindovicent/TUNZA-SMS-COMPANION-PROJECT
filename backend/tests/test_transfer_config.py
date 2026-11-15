@@ -3,6 +3,7 @@ import base64
 import pytest
 
 from tunza.config import ConfigurationError, build_config
+from tunza.fixture_database import provision_fixture_role
 
 
 def test_transfer_fixture_mode_is_off_by_default(settings):
@@ -29,6 +30,42 @@ def test_production_cannot_enable_synthetic_transfers(settings):
                 "PATIENT_KEY_VERSION": "synthetic-v1",
             }
         )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"DATABASE_RUNTIME_ROLE": "tunza_fixture_runtime"},
+        {"DATABASE_URL": "postgresql+psycopg://tunza_fixture_runtime@127.0.0.1/tunza_unit_test"},
+    ],
+)
+def test_production_cannot_use_fixture_database_credentials(settings, override):
+    with pytest.raises(ConfigurationError, match="fixture database principal"):
+        build_config(
+            {
+                **settings,
+                "APP_ENV": "production",
+                "SYNTHETIC_TRANSFERS_ENABLED": False,
+                "PATIENT_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"s" * 32).decode(),
+                "PATIENT_KEY_VERSION": "synthetic-v1",
+                **override,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "url,environment",
+    [
+        ("postgresql+psycopg://owner@127.0.0.1/tunza_fixture_test", "production"),
+        ("postgresql+psycopg://owner@remote.example/tunza_fixture_test", "testing"),
+        ("postgresql+psycopg://owner@127.0.0.1/tunza_production", "development"),
+        ("postgresql+psycopg://tunza_runtime@127.0.0.1/tunza_fixture_test", "testing"),
+        ("postgresql+psycopg://tunza_fixture_runtime@127.0.0.1/tunza_fixture_test", "testing"),
+    ],
+)
+def test_fixture_provisioning_refuses_inappropriate_targets_without_connecting(url, environment):
+    with pytest.raises(RuntimeError, match="separate owner and isolated loopback"):
+        provision_fixture_role(url, environment=environment)
 
 
 @pytest.mark.parametrize(
