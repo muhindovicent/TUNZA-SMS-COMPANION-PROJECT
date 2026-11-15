@@ -266,7 +266,7 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
         <span>
           <strong>TUNZA</strong> · A Zest Technologies project
         </span>
-        <span>Phase 2A-1 · Local development</span>
+        <span>Phase 3A · Local development</span>
       </footer>
     </div>
   )

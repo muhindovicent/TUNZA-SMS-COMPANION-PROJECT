@@ -2298,3 +2298,504 @@ def test_evidence_audit_failure_rolls_back(client, identity, monkeypatch):
         headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": str(uuid4())},
     )
     assert retry_response.status_code == 201, retry_response.json
+
+
+def _register_synthetic_patient_for_pregnancy(client, facility_id, reference_suffix="PREG"):
+    """Prepare a subsequent-episode scenario; completion is a privileged test fixture.
+
+    Registration already creates an ongoing episode. Do not make the production
+    API create a duplicate to satisfy these subsequent-episode tests.
+    """
+    patient_id = _register_synthetic_patient(client, facility_id, reference_suffix)
+    owner = create_engine(postgres_url(os.environ["TEST_MIGRATION_DATABASE_URL"]))
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE pregnancy_episodes SET lifecycle = 'completed' "
+                    "WHERE patient_id = :patient"
+                ),
+                {"patient": patient_id},
+            )
+    finally:
+        owner.dispose()
+    return patient_id
+
+
+def _assign_pregnancy_staff(identity, episode_id, login):
+    """Explicitly assign a second care worker; same facility alone grants no access."""
+    owner = create_engine(postgres_url(os.environ["TEST_MIGRATION_DATABASE_URL"]))
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO participant_assignments
+                    (id, episode_facility_assignment_id, facility_id, membership_id,
+                     duty, valid_from, version)
+                SELECT :id, a.id, a.facility_id, m.id, 'primary', now(), 1
+                FROM episode_facility_assignments a
+                JOIN facility_memberships m ON m.facility_id = a.facility_id
+                JOIN users u ON u.id = m.user_id
+                WHERE a.episode_id = :episode AND u.login_identifier = :login
+            """),
+                {"id": uuid4(), "episode": episode_id, "login": login},
+            )
+    finally:
+        owner.dispose()
+
+
+def test_pregnancy_episode_create_and_read(client, identity):
+    """Create a pregnancy episode and retrieve it with facility-scoped authorization."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-create")
+
+    key = str(uuid4())
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": key}
+    response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.json
+    episode_id = response.json["data"]["id"]
+    assert response.json["data"]["patient_id"] == patient_id
+    assert response.json["data"]["facility_id"] == facility_id
+    assert response.json["data"]["lifecycle"] == "ongoing"
+    assert response.json["data"]["communication_state"] == "paused"
+
+    # Idempotent replay returns the same episode
+    replay = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers=headers,
+    )
+    assert replay.status_code == 201, replay.json
+    assert replay.json["data"]["id"] == episode_id
+
+    # Retrieve the episode
+    detail = client.get(
+        f"/api/v1/pregnancy-episodes/{episode_id}?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert detail.status_code == 200, detail.json
+    assert detail.json["data"]["id"] == episode_id
+    assert detail.json["data"]["patient_id"] == patient_id
+
+
+def test_pregnancy_episode_idempotency_conflicting_request(client, identity):
+    """Reusing an idempotency key with different patient data must be rejected (409)."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-conflict")
+    patient_b_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-conflict-b")
+
+    key = str(uuid4())
+    headers = {"X-CSRF-Token": _csrf(client), "Idempotency-Key": key}
+    response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.json
+
+    conflicting = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_b_id, "facility_id": facility_id},
+        headers=headers,
+    )
+    assert conflicting.status_code == 409, conflicting.json
+
+
+def test_pregnancy_episode_cross_facility_denied(client, identity):
+    """An episode created at TST-A must not be readable from a TST-B context."""
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-cross")
+
+    key = str(uuid4())
+    response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert response.status_code == 201, response.json
+    episode_id = response.json["data"]["id"]
+
+    # Try to read as vht_b at TST-B - should be denied
+    client_b = identity.app.test_client()
+    _login(client_b, "tst.vht.b")
+    facility_b_id = str(identity.facility_ids["TST-B"])
+    detail = client_b.get(
+        f"/api/v1/pregnancy-episodes/{episode_id}?facility_id={facility_b_id}",
+        headers={"X-CSRF-Token": _csrf(client_b)},
+    )
+    assert detail.status_code == 404, detail.json
+
+
+def test_pregnancy_dating_revision_create_and_history(client, identity):
+    """Create dating revisions; corrections append and preserve prior history."""
+    # vht_a (VHT) lacks pregnancy.date; create an HCW user inline for dating authority.
+    with identity.app.app_context():
+        from tunza.identity.models import FacilityMembership, Role, RoleBinding, User
+        from tunza.identity.passwords import hash_password
+
+        hcw_user = User(
+            login_identifier="tst.hcw.a",
+            display_name="Synthetic HCW A",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(hcw_user)
+        db.session.flush()
+        db.session.add(
+            FacilityMembership(
+                user_id=hcw_user.id,
+                facility_id=identity.facility_ids["TST-A"],
+                status="active",
+                starts_at=datetime.now(UTC),
+            )
+        )
+        db.session.flush()
+        hcw_role = db.session.scalar(select(Role).where(Role.code == "HCW"))
+        db.session.add(
+            RoleBinding(
+                user_id=hcw_user.id,
+                role_id=hcw_role.id,
+                facility_id=identity.facility_ids["TST-A"],
+                scope_kind="facility",
+                starts_at=datetime.now(UTC),
+                granted_by=identity.user_ids["pa"],
+            )
+        )
+        db.session.commit()
+
+    client_hcw = identity.app.test_client()
+    _login(client_hcw, "tst.hcw.a", password=PASSWORD)
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-dating")
+
+    # Create pregnancy episode
+    key = str(uuid4())
+    episode_response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert episode_response.status_code == 201, episode_response.json
+    episode_id = episode_response.json["data"]["id"]
+
+    # First dating revision
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.a")
+    rev_key_1 = str(uuid4())
+    rev_response_1 = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "lmp",
+            "estimated_due_date": "2027-06-15",
+            "reason": "Last menstrual period based estimate.",
+        },
+        headers={
+            "X-CSRF-Token": _csrf(client_hcw),
+            "Idempotency-Key": rev_key_1,
+            "If-Match": '"1"',
+        },
+    )
+    assert rev_response_1.status_code == 201, rev_response_1.json
+    assert rev_response_1.json["data"]["revision_sequence"] == 1
+    assert rev_response_1.json["data"]["basis"] == "lmp"
+    revision_1_id = rev_response_1.json["data"]["id"]
+    assert rev_response_1.json["data"]["supersedes_id"] is None
+
+    # Correction: second dating revision
+    rev_key_2 = str(uuid4())
+    rev_response_2 = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "ultrasound",
+            "estimated_due_date": "2027-06-20",
+            "reason": "Ultrasound dating scan revised the due date.",
+        },
+        headers={
+            "X-CSRF-Token": _csrf(client_hcw),
+            "Idempotency-Key": rev_key_2,
+            "If-Match": '"2"',
+        },
+    )
+    assert rev_response_2.status_code == 201, rev_response_2.json
+    assert rev_response_2.json["data"]["revision_sequence"] == 2
+    assert rev_response_2.json["data"]["basis"] == "ultrasound"
+    assert rev_response_2.json["data"]["supersedes_id"] == revision_1_id
+
+    # Retrieve episode and verify both revisions are preserved
+    detail = client.get(
+        f"/api/v1/pregnancy-episodes/{episode_id}?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert detail.status_code == 200, detail.json
+    dating_summary = detail.json["data"]["dating_summary"]
+    assert dating_summary is not None
+    assert dating_summary["revision_id"] == rev_response_2.json["data"]["id"]
+    assert dating_summary["revision_sequence"] == 2
+
+
+def test_pregnancy_dating_idempotent_replay(client, identity):
+    """Same idempotency key + same dating request returns the existing revision."""
+    with identity.app.app_context():
+        from tunza.identity.models import FacilityMembership, Role, RoleBinding, User
+        from tunza.identity.passwords import hash_password
+
+        hcw_user = User(
+            login_identifier="tst.hcw.b",
+            display_name="Synthetic HCW B",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(hcw_user)
+        db.session.flush()
+        db.session.add(
+            FacilityMembership(
+                user_id=hcw_user.id,
+                facility_id=identity.facility_ids["TST-A"],
+                status="active",
+                starts_at=datetime.now(UTC),
+            )
+        )
+        db.session.flush()
+        hcw_role = db.session.scalar(select(Role).where(Role.code == "HCW"))
+        db.session.add(
+            RoleBinding(
+                user_id=hcw_user.id,
+                role_id=hcw_role.id,
+                facility_id=identity.facility_ids["TST-A"],
+                scope_kind="facility",
+                starts_at=datetime.now(UTC),
+                granted_by=identity.user_ids["pa"],
+            )
+        )
+        db.session.commit()
+
+    client_hcw = identity.app.test_client()
+    _login(client_hcw, "tst.hcw.b", password=PASSWORD)
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-idem")
+
+    key = str(uuid4())
+    episode_response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert episode_response.status_code == 201, episode_response.json
+    episode_id = episode_response.json["data"]["id"]
+
+    rev_key = str(uuid4())
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.b")
+    headers = {"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": rev_key, "If-Match": '"1"'}
+    response = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "clinical",
+            "estimated_due_date": "2027-07-01",
+            "reason": "Clinical assessment dating.",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.json
+    revision_id = response.json["data"]["id"]
+
+    replay = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "clinical",
+            "estimated_due_date": "2027-07-01",
+            "reason": "Clinical assessment dating.",
+        },
+        headers=headers,
+    )
+    assert replay.status_code == 201, replay.json
+    assert replay.json["data"]["id"] == revision_id
+
+
+def test_pregnancy_dating_conflicting_idempotency_key(client, identity):
+    """Reusing a dating idempotency key with different data must be rejected (409)."""
+    with identity.app.app_context():
+        from tunza.identity.models import FacilityMembership, Role, RoleBinding, User
+        from tunza.identity.passwords import hash_password
+
+        hcw_user = User(
+            login_identifier="tst.hcw.c",
+            display_name="Synthetic HCW C",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(hcw_user)
+        db.session.flush()
+        db.session.add(
+            FacilityMembership(
+                user_id=hcw_user.id,
+                facility_id=identity.facility_ids["TST-A"],
+                status="active",
+                starts_at=datetime.now(UTC),
+            )
+        )
+        db.session.flush()
+        hcw_role = db.session.scalar(select(Role).where(Role.code == "HCW"))
+        db.session.add(
+            RoleBinding(
+                user_id=hcw_user.id,
+                role_id=hcw_role.id,
+                facility_id=identity.facility_ids["TST-A"],
+                scope_kind="facility",
+                starts_at=datetime.now(UTC),
+                granted_by=identity.user_ids["pa"],
+            )
+        )
+        db.session.commit()
+
+    client_hcw = identity.app.test_client()
+    _login(client_hcw, "tst.hcw.c", password=PASSWORD)
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(
+        client, facility_id, "preg-date-conflict"
+    )
+
+    key = str(uuid4())
+    episode_response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert episode_response.status_code == 201, episode_response.json
+    episode_id = episode_response.json["data"]["id"]
+
+    rev_key = str(uuid4())
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.c")
+    headers = {"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": rev_key, "If-Match": '"1"'}
+    response = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "lmp",
+            "estimated_due_date": "2027-08-01",
+            "reason": "Initial dating estimate.",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.json
+
+    conflicting = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "ultrasound",
+            "estimated_due_date": "2027-08-15",
+            "reason": "Different dating basis and due date.",
+        },
+        headers=headers,
+    )
+    assert conflicting.status_code == 409, conflicting.json
+
+
+def test_pregnancy_dating_audit_failure_rolls_back(client, identity, monkeypatch):
+    """Audit failure during dating revision must roll back the entire transaction."""
+    import tunza.pregnancy.routes as pregnancy_routes
+
+    with identity.app.app_context():
+        from tunza.identity.models import FacilityMembership, Role, RoleBinding, User
+        from tunza.identity.passwords import hash_password
+
+        hcw_user = User(
+            login_identifier="tst.hcw.d",
+            display_name="Synthetic HCW D",
+            password_hash=hash_password(PASSWORD),
+            status="active",
+        )
+        db.session.add(hcw_user)
+        db.session.flush()
+        db.session.add(
+            FacilityMembership(
+                user_id=hcw_user.id,
+                facility_id=identity.facility_ids["TST-A"],
+                status="active",
+                starts_at=datetime.now(UTC),
+            )
+        )
+        db.session.flush()
+        hcw_role = db.session.scalar(select(Role).where(Role.code == "HCW"))
+        db.session.add(
+            RoleBinding(
+                user_id=hcw_user.id,
+                role_id=hcw_role.id,
+                facility_id=identity.facility_ids["TST-A"],
+                scope_kind="facility",
+                starts_at=datetime.now(UTC),
+                granted_by=identity.user_ids["pa"],
+            )
+        )
+        db.session.commit()
+
+    client_hcw = identity.app.test_client()
+    _login(client_hcw, "tst.hcw.d", password=PASSWORD)
+
+    _login(client, "tst.vht.a")
+    facility_id = str(identity.facility_ids["TST-A"])
+    patient_id = _register_synthetic_patient_for_pregnancy(client, facility_id, "preg-audit")
+
+    key = str(uuid4())
+    episode_response = client.post(
+        "/api/v1/pregnancy-episodes",
+        json={"patient_id": patient_id, "facility_id": facility_id},
+        headers={"X-CSRF-Token": _csrf(client), "Idempotency-Key": key},
+    )
+    assert episode_response.status_code == 201, episode_response.json
+    episode_id = episode_response.json["data"]["id"]
+
+    def fail_audit(**_kwargs):
+        raise SQLAlchemyError("synthetic audit failure")
+
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.d")
+    with monkeypatch.context() as patch:
+        patch.setattr(pregnancy_routes, "_record_pregnancy_audit", fail_audit)
+        response = client_hcw.post(
+            f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+            json={
+                "basis": "lmp",
+                "estimated_due_date": "2027-09-01",
+                "reason": "Audit rollback test.",
+            },
+            headers={
+                "X-CSRF-Token": _csrf(client_hcw),
+                "Idempotency-Key": str(uuid4()),
+                "If-Match": '"1"',
+            },
+        )
+        assert response.status_code == 503, response.json
+
+    # Verify no dating revision was created despite the 503
+    detail = client.get(
+        f"/api/v1/pregnancy-episodes/{episode_id}?facility_id={facility_id}",
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert detail.status_code == 200
+    assert detail.json["data"]["dating_summary"] is None
+
+    # Retry with working audit - should succeed
+    retry_response = client_hcw.post(
+        f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
+        json={
+            "basis": "lmp",
+            "estimated_due_date": "2027-09-01",
+            "reason": "Audit rollback test.",
+        },
+        headers={
+            "X-CSRF-Token": _csrf(client_hcw),
+            "Idempotency-Key": str(uuid4()),
+            "If-Match": '"1"',
+        },
+    )
+    assert retry_response.status_code == 201, retry_response.json

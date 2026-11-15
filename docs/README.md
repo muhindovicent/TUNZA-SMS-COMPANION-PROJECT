@@ -18,6 +18,9 @@ For automated checks of that foundation, see the [Phase 1B CI verification check
 
 For implemented staff sign-in, sessions, and facility-scoped access, see the [Phase 1B-1 authentication guide](phase-1b-1-authentication.md).
 
+For the implemented synthetic pregnancy and dating-history milestone, see
+[Phase 3A — pregnancy episodes and dating history](phase-3a-pregnancy-dating.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)

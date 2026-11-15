@@ -147,3 +147,10 @@ h3 { font-size: 17px; margin: 0; font-weight: 650; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
 }
+:root { --pregnancy-gap: 1rem; }
+.pregnancy-panel { margin-block: 2rem; min-width: 0; }
+.pregnancy-panel select, .pregnancy-panel input, .pregnancy-panel textarea { max-width: 100%; min-width: 0; }
+.dating-form { display: grid; gap: var(--pregnancy-gap); grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.dating-form h3, .dating-form label:has(textarea) { grid-column: 1 / -1; }
+.dating-history { display: grid; gap: var(--pregnancy-gap); padding-inline-start: 1.5rem; }
+.dating-history li { overflow-wrap: anywhere; }

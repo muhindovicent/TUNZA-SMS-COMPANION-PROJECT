@@ -17,6 +17,7 @@ export interface ApiRequest {
   body?: unknown
   signal?: AbortSignal
   idempotencyKey?: string
+  ifMatch?: string
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -72,6 +73,7 @@ export async function apiFetch<T>(path: string, request: ApiRequest = {}): Promi
   const method = request.method ?? 'GET'
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (request.idempotencyKey) headers['Idempotency-Key'] = request.idempotencyKey
+  if (request.ifMatch) headers['If-Match'] = request.ifMatch
   let payload: string | undefined
   if (request.body !== undefined) {
     headers['Content-Type'] = 'application/json'

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { apiFetch } from '../api/client'
 import type { StaffIdentity } from '../api/auth'
+import PregnancyManagement from './PregnancyManagement'
 
 interface Patient {
   id: string
@@ -16,11 +17,13 @@ export default function PatientRegistry({ identity }: { identity: StaffIdentity 
   const [reference, setReference] = useState('')
   const [language, setLanguage] = useState('en')
   const [patient, setPatient] = useState<Patient | null>(null)
+  const [managingPregnancy, setManagingPregnancy] = useState(false)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [retry, setRetry] = useState<{ input: string; key: string } | null>(null)
   const canRead = identity.permissions.includes('patient.read')
   const canRegister = identity.permissions.includes('patient.register')
+  const canManagePregnancy = identity.permissions.includes('pregnancy.read')
 
   async function register(event: FormEvent) {
     event.preventDefault()
@@ -104,7 +107,11 @@ export default function PatientRegistry({ identity }: { identity: StaffIdentity 
       {patient && <article>
         <h2>Patient</h2><p>Reference: {patient.local_reference}</p><p>Language: {patient.language}</p>
         {canRead && <button type="button" onClick={detail} disabled={busy}>View detail</button>}
+        {canManagePregnancy && <button type="button" disabled={busy}
+          onClick={() => setManagingPregnancy(true)}>Manage pregnancy episodes</button>}
       </article>}
+      {patient && managingPregnancy && canManagePregnancy && <PregnancyManagement
+        key={`${patient.facility_id}:${patient.id}`} identity={identity} patient={patient} />}
     </section>
   )
 }
