@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { apiFetch } from './client'
+import { apiFetch, apiFetchPage } from './client'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -17,4 +17,15 @@ it('sends dating version, idempotency and CSRF together with session credentials
     headers: { 'Idempotency-Key': 'synthetic-key', 'If-Match': '"2"',
       'X-CSRF-Token': 'synthetic-csrf', 'Content-Type': 'application/json' },
   })
+})
+
+it('retains the signed appointment pagination cursor with authenticated no-store reads', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    data: [{ id: 'synthetic-booking' }], page: { next_cursor: 'synthetic-signed-cursor' },
+  })))
+  vi.stubGlobal('fetch', fetchMock)
+  const result = await apiFetchPage<{ id: string }>('/appointments?facility_id=synthetic&episode_id=synthetic')
+  expect(result.page.next_cursor).toBe('synthetic-signed-cursor')
+  expect(result.data).toEqual([{ id: 'synthetic-booking' }])
+  expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store' })
 })

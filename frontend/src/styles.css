@@ -154,3 +154,10 @@ h3 { font-size: 17px; margin: 0; font-weight: 650; }
 .dating-form h3, .dating-form label:has(textarea) { grid-column: 1 / -1; }
 .dating-history { display: grid; gap: var(--pregnancy-gap); padding-inline-start: 1.5rem; }
 .dating-history li { overflow-wrap: anywhere; }
+.appointment-panel { margin-block: 2rem; min-width: 0; }
+.appointment-form { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.appointment-form h4, .appointment-form label:has(textarea) { grid-column: 1 / -1; }
+.appointment-list { display: grid; gap: 1rem; margin-block: 1rem; }
+.appointment-list article { padding: 1rem; border: 1px solid #cddcd5; border-radius: .5rem; overflow-wrap: anywhere; }
+.appointment-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.appointment-panel input, .appointment-panel textarea, .appointment-panel select { min-width: 0; max-width: 100%; }

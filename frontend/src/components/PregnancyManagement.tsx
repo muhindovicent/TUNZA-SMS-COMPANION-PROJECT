@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ApiError, apiFetch } from '../api/client'
 import type { StaffIdentity } from '../api/auth'
+import AppointmentManagement from './AppointmentManagement'
 
 interface DatingRevision {
   id: string
@@ -23,6 +24,7 @@ interface PregnancyEpisode {
   lifecycle: string
   communication_state: string
   version: number
+  assignment_id: string | null
   dating_summary: DatingRevision | null
 }
 
@@ -167,6 +169,9 @@ export default function PregnancyManagement({ identity, patient }: {
         <dl><dt>Lifecycle</dt><dd>{episode.lifecycle}</dd>
           <dt>Communication</dt><dd>{episode.communication_state}</dd>
           <dt>Version</dt><dd>{episode.version}</dd></dl>
+        {identity.permissions.includes('appointment.read') && <AppointmentManagement
+          key={`${patient.facility_id}:${episode.id}`} identity={identity} episode={episode}
+          facilityId={patient.facility_id} onChanged={() => loadDetail(episode.id)} />}
         {canDate && episode.lifecycle === 'ongoing' && <form className="dating-form" onSubmit={addDatingRevision}>
           <h3>Record dating revision</h3>
           <label>Recorded method

@@ -69,7 +69,9 @@ export async function fetchCsrfToken(signal?: AbortSignal): Promise<string> {
   return body.data.csrf_token
 }
 
-export async function apiFetch<T>(path: string, request: ApiRequest = {}): Promise<T> {
+async function fetchEnvelope<T>(path: string, request: ApiRequest = {}): Promise<{
+  data: T; page?: { next_cursor: string | null }
+}> {
   const method = request.method ?? 'GET'
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (request.idempotencyKey) headers['Idempotency-Key'] = request.idempotencyKey
@@ -101,7 +103,7 @@ export async function apiFetch<T>(path: string, request: ApiRequest = {}): Promi
     )
   }
 
-  if (response.status === 204) return undefined as T
+  if (response.status === 204) return { data: undefined as T }
 
   const body = await readJson(response)
   if (!response.ok) {
@@ -120,5 +122,18 @@ export async function apiFetch<T>(path: string, request: ApiRequest = {}): Promi
       response.status,
     )
   }
-  return body.data as T
+  return { data: body.data as T, page: isObject(body.page) ? {
+    next_cursor: typeof body.page.next_cursor === 'string' ? body.page.next_cursor : null,
+  } : undefined }
+}
+
+export async function apiFetch<T>(path: string, request: ApiRequest = {}): Promise<T> {
+  return (await fetchEnvelope<T>(path, request)).data
+}
+
+export async function apiFetchPage<T>(path: string, request: ApiRequest = {}): Promise<{
+  data: T[]; page: { next_cursor: string | null }
+}> {
+  const result = await fetchEnvelope<T[]>(path, request)
+  return { data: result.data, page: result.page ?? { next_cursor: null } }
 }

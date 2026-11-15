@@ -458,6 +458,12 @@ Global endpoint uniqueness means one restricted row per normalized destination; 
 
 ## 5. Appointment and content dictionary
 
+The additive implementation in migration `0010_anc_appointments` is documented in
+[Phase 3B](phase-3b-anc-appointments.md). It adds facility/episode-scoped bookings,
+encrypted append-only events and encrypted command replay, with database-enforced
+transitions, replacement uniqueness and FORCE RLS. Reference schedules, patient
+SMS responses and content/messaging tables below remain draft future contracts.
+
 | Entity | Additional columns / references | Keys and checks |
 | --- | --- | --- |
 | `anc_reference_schedule_versions` | `code text!`, `revision integer!`, `source_reference text!`, `approval_reference text?`, `status text!` | Unique `(code,revision)`; effective schedule requires clinical approval D06 |

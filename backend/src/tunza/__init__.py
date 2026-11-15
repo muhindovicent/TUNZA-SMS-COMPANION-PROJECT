@@ -28,6 +28,8 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         app.config["LOGIN_RATE_LIMIT_WINDOW_SECONDS"],
     )
 
+    from tunza.appointments import blueprint as appointments_blueprint
+    from tunza.appointments import routes as appointment_routes  # noqa: F401
     from tunza.health import blueprint as health_blueprint
     from tunza.identity import admin as identity_admin  # noqa: F401
     from tunza.identity import admin_blueprint, auth_blueprint, facilities_blueprint
@@ -43,6 +45,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.register_blueprint(admin_blueprint)
     app.register_blueprint(patients_blueprint)
     app.register_blueprint(pregnancy_blueprint)
+    app.register_blueprint(appointments_blueprint)
 
     from tunza.commands import seed_synthetic_identity
 
