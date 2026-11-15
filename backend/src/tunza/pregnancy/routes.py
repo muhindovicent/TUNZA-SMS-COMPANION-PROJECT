@@ -143,6 +143,13 @@ def _episode_data(episode, facility_id):
         "lifecycle": episode.lifecycle,
         "communication_state": episode.communication_state,
         "version": episode.version,
+        "completion_record_id": str(episode.completion_record_id)
+        if episode.completion_record_id
+        else None,
+        "messaging_eligible": False,
+        "messaging_hold_reason": "episode_completed"
+        if episode.lifecycle == "completed"
+        else "policy_unconfigured",
         "assignment_id": str(assignment.id) if assignment else None,
         "dating_summary": {**_revision_data(latest), "revision_id": str(latest.id)}
         if latest

@@ -105,6 +105,21 @@ class AppointmentEvent(db.Model):
     __tablename__ = "appointment_events"
     __table_args__ = (
         sa.ForeignKeyConstraint(
+            ["completion_record_id", "episode_id", "patient_id", "facility_id"],
+            [
+                "pregnancy_completion_records.id",
+                "pregnancy_completion_records.episode_id",
+                "pregnancy_completion_records.patient_id",
+                "pregnancy_completion_records.facility_id",
+            ],
+            name="fk_appointment_event_completion_scope",
+            ondelete="RESTRICT",
+        ),
+        sa.CheckConstraint(
+            "completion_record_id IS NULL OR event_type = 'cancelled'",
+            name="completion_event_cancelled",
+        ),
+        sa.ForeignKeyConstraint(
             ["appointment_id", "episode_id", "patient_id", "facility_id"],
             [
                 "appointments.id",
@@ -124,6 +139,7 @@ class AppointmentEvent(db.Model):
     )
     id: Mapped[UUID] = mapped_column(sa.Uuid, primary_key=True, default=uuid4)
     appointment_id: Mapped[UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    completion_record_id: Mapped[UUID | None] = mapped_column(sa.Uuid)
     episode_id: Mapped[UUID] = mapped_column(sa.Uuid, nullable=False)
     patient_id: Mapped[UUID] = mapped_column(sa.Uuid, nullable=False)
     facility_id: Mapped[UUID] = mapped_column(sa.Uuid, nullable=False)

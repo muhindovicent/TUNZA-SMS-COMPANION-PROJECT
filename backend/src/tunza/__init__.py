@@ -37,6 +37,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     from tunza.patients import blueprint as patients_blueprint
     from tunza.patients import routes as patient_routes  # noqa: F401
     from tunza.pregnancy import blueprint as pregnancy_blueprint
+    from tunza.pregnancy import completion as completion_routes  # noqa: F401
     from tunza.pregnancy import routes as pregnancy_routes  # noqa: F401
     from tunza.transfers import blueprint as transfers_blueprint
     from tunza.transfers import routes as transfer_routes  # noqa: F401

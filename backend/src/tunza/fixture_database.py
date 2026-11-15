@@ -118,6 +118,7 @@ def provision_fixture_role(owner_value, *, environment):
             for signature in (
                 "tunza_current_uuid(text)",
                 "tunza_pregnancy_assigned(uuid)",
+                "tunza_pregnancy_can_complete(uuid)",
                 "tunza_appointment_scope(uuid,uuid,uuid,uuid)",
                 "tunza_transfer_permission(uuid,text,boolean)",
                 "tunza_transfer_visible(uuid,uuid,uuid,uuid)",

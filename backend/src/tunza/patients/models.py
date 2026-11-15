@@ -127,6 +127,20 @@ class PregnancyEpisode(db.Model):
     __tablename__ = "pregnancy_episodes"
     __table_args__ = (
         UniqueConstraint("id", "patient_id", name="episode_id_patient"),
+        ForeignKeyConstraint(
+            ["completion_record_id", "id"],
+            ["pregnancy_completion_records.id", "pregnancy_completion_records.episode_id"],
+            name="fk_episode_current_completion",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "completion_record_id IS NULL OR (lifecycle = 'completed' "
+            "AND communication_state IN ('completed','withdrawn'))",
+            name="completion_state_alignment",
+        ),
         UniqueConstraint(
             "facility_id", "idempotency_key", name="uq_pregnancy_episode_facility_idempotency_key"
         ),
@@ -164,6 +178,7 @@ class PregnancyEpisode(db.Model):
     )
     lifecycle: Mapped[str] = mapped_column(String(16), nullable=False, default="ongoing")
     communication_state: Mapped[str] = mapped_column(String(16), nullable=False, default="paused")
+    completion_record_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(

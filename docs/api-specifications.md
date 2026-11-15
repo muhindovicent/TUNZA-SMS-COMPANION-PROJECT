@@ -191,6 +191,13 @@ Administration list/detail projections exclude clinical profile fields. Binding 
 
 ## 6. Care and transfer contracts
 
+**Implemented Phase 4B:** [pregnancy completion](phase-4b-pregnancy-completion.md)
+supports initial ongoing-episode completion and explicitly superseding append-only
+corrections. POST/GET `/pregnancy-episodes/{id}/completion` require current
+`pregnancy.complete` scope; only empty `approved_outcome_fields` are accepted while
+D02/D05 remain unresolved. Closure cancels future current-responsibility bookings
+atomically and never reopens an episode or creates postnatal enrolment.
+
 **Implemented Phase 4A fixture subset:** see [controlled synthetic transfers](phase-4a-controlled-transfers.md).
 It is disabled by default and unavailable in production. Only fixture-code handover
 metadata is accepted; D04/D09 authority, clinical handover and participant agreement

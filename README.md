@@ -4,7 +4,7 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Feature-branch milestone: Phase 4A — controlled synthetic facility transfers.** The existing registry, consent, pregnancy and appointment workflows are preserved. Transfers are disabled by default and unavailable in production while D04/D09 remain unresolved. Fixture execution requires a separately authenticated non-production database login; the standard runtime has no fixture execution privilege. All development and verification use synthetic data exclusively. See the [Phase 4A implementation and policy-boundary guide](docs/phase-4a-controlled-transfers.md).
+**Feature-branch milestone: Phase 4B — synthetic pregnancy completion and lifecycle closure.** Authorized staff can append completion/correction records and atomically close current future ANC work while preserving history and withdrawal. No clinical outcome fields are approved, and no postnatal enrolment or messaging is created. The isolated fixture-transfer security boundary remains intact. All development and verification use synthetic data exclusively. See the [Phase 4B implementation guide](docs/phase-4b-pregnancy-completion.md).
 
 **Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md) · [Phase 1B-1 authentication guide](docs/phase-1b-1-authentication.md).
 
@@ -66,6 +66,6 @@ The earlier [technical implementation plan](TECHNICAL_IMPLEMENTATION_PLAN.md) is
 
 ## Development boundary
 
-This milestone includes staff authentication, synthetic patient registration, eligibility/consent, pregnancy dating history, manually entered ANC bookings and opt-in synthetic transfers. Transfers do not approve live authority, copy clinical charts or consent, or activate destination messaging. Bookings remain held for reminders while D06 is unresolved. Sign-in accounts are staff-provisioned; there is no public self-registration. See the setup guides for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
+This milestone includes staff authentication, the synthetic registry, consent, pregnancy dating history, ANC bookings, opt-in fixture transfers and auditable pregnancy completion. Clinical policy decisions remain unresolved; completion accepts no clinical outcomes and cannot activate messaging or postnatal enrolment. Transfers remain disabled by default and isolated from the standard runtime. Sign-in accounts are staff-provisioned; there is no public self-registration. See the setup guides for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
 
 Postnatal workflows, minors' enrolment, live two-way SMS, and live emergency escalation require separate approval and are outside the current implementation authorization.
