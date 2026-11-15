@@ -61,7 +61,7 @@ export default function AppointmentManagement({ identity, episode, facilityId, o
       if (!controller.signal.aborted) setMessage('Appointments are unavailable.')
     }).finally(() => { if (!controller.signal.aborted) setBusy(false) })
     return () => controller.abort()
-  }, [load])
+  }, [load, episode.lifecycle])
 
   async function refresh(next?: string) {
     setBusy(true); setMessage('')

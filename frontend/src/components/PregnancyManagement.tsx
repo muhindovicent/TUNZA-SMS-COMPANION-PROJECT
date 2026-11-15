@@ -4,6 +4,7 @@ import { ApiError, apiFetch } from '../api/client'
 import type { StaffIdentity } from '../api/auth'
 import AppointmentManagement from './AppointmentManagement'
 import TransferManagement from './TransferManagement'
+import PregnancyCompletion from './PregnancyCompletion'
 
 interface DatingRevision {
   id: string
@@ -26,6 +27,7 @@ interface PregnancyEpisode {
   communication_state: string
   version: number
   assignment_id: string | null
+  completion_record_id: string | null
   dating_summary: DatingRevision | null
 }
 
@@ -63,6 +65,7 @@ export default function PregnancyManagement({ identity, patient }: {
     ])
     if (!signal?.aborted) {
       setEpisode(detail)
+      setEpisodes((previous) => previous.map((row) => row.id === detail.id ? detail : row))
       setHistory(revisions)
     }
   }, [facilityQuery])
@@ -170,6 +173,9 @@ export default function PregnancyManagement({ identity, patient }: {
         <dl><dt>Lifecycle</dt><dd>{episode.lifecycle}</dd>
           <dt>Communication</dt><dd>{episode.communication_state}</dd>
           <dt>Version</dt><dd>{episode.version}</dd></dl>
+        {identity.permissions.includes('pregnancy.complete') && <PregnancyCompletion
+          key={`completion:${patient.facility_id}:${episode.id}`} identity={identity} episode={episode}
+          facilityId={patient.facility_id} onChanged={() => loadDetail(episode.id)} />}
         {identity.permissions.includes('transfer.initiate') && <TransferManagement
           key={`transfer:${patient.facility_id}:${episode.id}`} identity={identity} episode={episode}
           facilityId={patient.facility_id} onChanged={() => loadDetail(episode.id)} />}

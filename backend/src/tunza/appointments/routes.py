@@ -147,11 +147,14 @@ def _decrypt(value, version, purpose):
     )
 
 
-def _event(row, actor, *, previous=None, reason=None, related_id=None, effective=None):
+def _event(
+    row, actor, *, previous=None, reason=None, related_id=None, effective=None, completion_id=None
+):
     db.session.add(
         AppointmentEvent(
             id=uuid4(),
             appointment_id=row.id,
+            completion_record_id=completion_id,
             episode_id=row.episode_id,
             patient_id=row.patient_id,
             facility_id=row.facility_id,
@@ -495,6 +498,11 @@ def _read(appointment_id, history=False):
                     "recorded_by": str(event.recorded_by),
                     "effective_at": _iso(event.effective_at),
                     "created_at": _iso(event.created_at),
+                    **(
+                        {"completion_record_id": str(event.completion_record_id)}
+                        if event.completion_record_id
+                        else {}
+                    ),
                     "data": _decrypt(
                         event.event_data_cipher, event.key_version, "appointment-event"
                     ),

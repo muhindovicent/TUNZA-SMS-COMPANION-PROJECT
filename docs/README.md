@@ -27,6 +27,9 @@ For staff-entered synthetic ANC booking workflows, see
 For the opt-in fixture workflow and its unresolved D04/D09 boundaries, see
 [Phase 4A — controlled synthetic transfers](phase-4a-controlled-transfers.md).
 
+For append-only completion and auditable lifecycle closure, see
+[Phase 4B — pregnancy completion](phase-4b-pregnancy-completion.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)

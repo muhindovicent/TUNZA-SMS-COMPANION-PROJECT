@@ -58,7 +58,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0012_fixture_execution_boundary"
+                assert revision == "0013_pregnancy_completion"
             result = runner.invoke(args=["db", "downgrade", "0006_patient_eligibility_consent"])
             assert result.exit_code == 0, result.output
             with migration_engine.connect() as connection:
@@ -107,6 +107,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 "patients",
                 "pregnancy_dating_revisions",
                 "pregnancy_episodes",
+                "pregnancy_completion_records",
                 "permissions",
                 "protected_evidence",
                 "role_bindings",

@@ -443,6 +443,12 @@ erDiagram
 
 ## 4. Participant, consent, and care dictionary
 
+The concrete synthetic completion implementation is described in
+[Phase 4B](phase-4b-pregnancy-completion.md). Migration `0013_pregnancy_completion`
+adds immutable completion revisions, a same-episode current pointer and completion-
+linked cancellation events with FORCE RLS and consistency guards. Legacy completed
+episodes remain unchanged rather than receiving invented outcome/date records.
+
 | Entity | Additional columns / references | Keys and checks |
 | --- | --- | --- |
 | `patients` | Opaque stable identity only; no globally exposed demographics | UUID continuity across episodes; no global staff search |
