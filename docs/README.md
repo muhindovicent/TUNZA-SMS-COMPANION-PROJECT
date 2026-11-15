@@ -24,6 +24,9 @@ For the implemented synthetic pregnancy and dating-history milestone, see
 For staff-entered synthetic ANC booking workflows, see
 [Phase 3B — ANC appointment management](phase-3b-anc-appointments.md).
 
+For the opt-in fixture workflow and its unresolved D04/D09 boundaries, see
+[Phase 4A — controlled synthetic transfers](phase-4a-controlled-transfers.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)

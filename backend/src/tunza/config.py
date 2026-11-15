@@ -107,8 +107,19 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     if environment == "production" and "PATIENT_KEY_VERSION" not in values:
         raise ConfigurationError("PATIENT_KEY_VERSION is required in production.")
     patient_encryption_key = _patient_encryption_key(values, environment, secret)
+    synthetic_transfers = _boolean(
+        values.get("SYNTHETIC_TRANSFERS_ENABLED", False), "SYNTHETIC_TRANSFERS_ENABLED"
+    )
+    if environment == "production" and synthetic_transfers:
+        raise ConfigurationError(
+            "Synthetic transfers cannot be enabled in production; D04/D09 are unresolved."
+        )
 
     database_url = postgres_url(values.get("DATABASE_URL"))
+    if environment == "production" and (
+        runtime_role == "tunza_fixture_runtime" or database_url.username == "tunza_fixture_runtime"
+    ):
+        raise ConfigurationError("The fixture database principal cannot be used in production.")
     migration_url = values.get("MIGRATION_DATABASE_URL")
     connect_timeout = _integer(
         values.get("DATABASE_CONNECT_TIMEOUT", 3), "DATABASE_CONNECT_TIMEOUT", 1, 30
@@ -166,6 +177,7 @@ def build_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         "DATABASE_RUNTIME_ROLE": runtime_role,
         "PATIENT_ENCRYPTION_KEY": patient_encryption_key,
         "PATIENT_KEY_VERSION": patient_key_version,
+        "SYNTHETIC_TRANSFERS_ENABLED": synthetic_transfers,
         "SQLALCHEMY_ENGINE_OPTIONS": {
             "pool_pre_ping": True,
             "pool_size": 5,

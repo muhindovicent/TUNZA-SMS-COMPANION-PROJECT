@@ -191,6 +191,16 @@ Administration list/detail projections exclude clinical profile fields. Binding 
 
 ## 6. Care and transfer contracts
 
+**Implemented Phase 4A fixture subset:** see [controlled synthetic transfers](phase-4a-controlled-transfers.md).
+It is disabled by default and unavailable in production. Only fixture-code handover
+metadata is accepted; D04/D09 authority, clinical handover and participant agreement
+rules remain unresolved. No source chart or consent portability is enabled by the
+broader proposed `TransferInput` below.
+Migration 0012 additionally removes the standard runtime's database execution
+capability: fixture operations require an explicitly provisioned, separately
+authenticated non-production login. Caller-set session variables are not proof
+of fixture authorization.
+
 **Implemented Phase 3B subset:** see [ANC appointment management](phase-3b-anc-appointments.md)
 for the concrete booking/event contracts, required facility context and If-Match
 versions, UTC timestamps, signed pagination, transition rules and idempotency.

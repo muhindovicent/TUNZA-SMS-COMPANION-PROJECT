@@ -215,6 +215,14 @@ erDiagram
 
 ### Transfers and appointments
 
+The concrete fixture-only transfer tables and scoped acceptance transaction are
+implemented by `0011_controlled_transfers`; see [Phase 4A](phase-4a-controlled-transfers.md)
+for decision ownership, restricted handover, RLS and responsibility non-overlap.
+The surrounding ERD remains a broader draft, not approval of D04/D09 policy.
+Migration `0012_fixture_execution_boundary` revokes standard-runtime fixture access
+and adds an authenticated fixture-login guard; it preserves transfer data and does
+not relax the row policies or responsibility constraints.
+
 ```mermaid
 erDiagram
     episode_facility_assignments ||--o{ facility_transfers : source

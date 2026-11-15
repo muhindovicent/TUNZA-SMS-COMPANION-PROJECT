@@ -58,7 +58,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0010_anc_appointments"
+                assert revision == "0012_fixture_execution_boundary"
             result = runner.invoke(args=["db", "downgrade", "0006_patient_eligibility_consent"])
             assert result.exit_code == 0, result.output
             with migration_engine.connect() as connection:
@@ -89,6 +89,10 @@ def test_postgres_migration_roundtrip_and_readiness():
                 "appointments",
                 "appointment_events",
                 "appointment_idempotency",
+                "facility_transfers",
+                "transfer_handover_records",
+                "transfer_decisions",
+                "transfer_idempotency",
                 "auth_sessions",
                 "communication_preferences",
                 "consent_events",
@@ -406,6 +410,101 @@ def test_0009_populated_upgrade_preserves_records_or_fails_atomically(legacy_sta
                 )
                 == "Synthetic preserved dating record"
             )
+        # Phase 4A must also preserve populated appointment history and replay.
+        appointment = uuid4()
+        with engine.begin() as connection:
+            responsibility = connection.scalar(
+                text("SELECT id FROM episode_facility_assignments WHERE episode_id = :id"),
+                {"id": episode},
+            )
+            connection.execute(
+                text("""
+                INSERT INTO appointments
+                    (id,episode_id,patient_id,facility_id,episode_facility_assignment_id,
+                     starts_at,status,created_by)
+                VALUES (:id,:episode,:patient,:facility,:assignment,'2027-06-15T06:00:00Z',
+                        'scheduled',:actor)
+            """),
+                {
+                    "id": appointment,
+                    "episode": episode,
+                    "patient": patient,
+                    "facility": facility,
+                    "assignment": responsibility,
+                    "actor": actor,
+                },
+            )
+            connection.execute(
+                text("""
+                INSERT INTO appointment_events
+                    (id,appointment_id,episode_id,patient_id,facility_id,event_type,sequence,
+                     event_data_cipher,key_version,recorded_by,effective_at)
+                VALUES (:id,:booking,:episode,:patient,:facility,'scheduled',1,
+                        :cipher,'synthetic-v1',:actor,now())
+            """),
+                {
+                    "id": uuid4(),
+                    "booking": appointment,
+                    "episode": episode,
+                    "patient": patient,
+                    "facility": facility,
+                    "cipher": b"synthetic-legacy-event",
+                    "actor": actor,
+                },
+            )
+            connection.execute(
+                text("""
+                INSERT INTO appointment_idempotency
+                    (id,actor_id,facility_id,appointment_id,episode_id,patient_id,operation,key,
+                     request_hash,response_cipher,key_version,response_status)
+                VALUES (:id,:actor,:facility,:booking,:episode,:patient,'appointment.schedule',
+                        'synthetic-migration-replay',:hash,:cipher,'synthetic-v1',201)
+            """),
+                {
+                    "id": uuid4(),
+                    "actor": actor,
+                    "facility": facility,
+                    "booking": appointment,
+                    "episode": episode,
+                    "patient": patient,
+                    "hash": b"synthetic-hash",
+                    "cipher": b"synthetic-legacy-response",
+                },
+            )
+        result = runner.invoke(args=["db", "downgrade", "0010_anc_appointments"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(args=["db", "upgrade"])
+        assert result.exit_code == 0, result.output
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT event_data_cipher FROM appointment_events "
+                        "WHERE appointment_id = :id"
+                    ),
+                    {"id": appointment},
+                )
+                == b"synthetic-legacy-event"
+            )
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT response_cipher FROM appointment_idempotency "
+                        "WHERE appointment_id = :id"
+                    ),
+                    {"id": appointment},
+                )
+                == b"synthetic-legacy-response"
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT starts_at::date::text FROM appointments WHERE id = :id"),
+                    {"id": appointment},
+                )
+                == "2027-06-15"
+            )
+        result = runner.invoke(args=["db", "check"])
+        assert result.exit_code == 0, result.output
     finally:
         with app.app_context():
             db.session.remove()
