@@ -1,7 +1,20 @@
-import { useState, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { apiFetch } from '../api/client'
+import { ApiError, apiFetch } from '../api/client'
 import type { StaffIdentity } from '../api/auth'
+
+interface DatingRevision {
+  id: string
+  episode_id: string
+  basis: string
+  estimated_due_date: string
+  reason: string
+  recorded_by: string
+  created_at: string
+  revision_sequence: number
+  supersedes_id: string | null
+  parent_version: number
+}
 
 interface PregnancyEpisode {
   id: string
@@ -10,225 +23,173 @@ interface PregnancyEpisode {
   lifecycle: string
   communication_state: string
   version: number
-  assignment_id: string | null
-  dating_summary: {
-    revision_id: string
-    basis: string
-    estimated_due_date: string
-    reason: string
-    revision_sequence: number
-    supersedes_id: string | null
-  } | null
+  dating_summary: DatingRevision | null
 }
 
-interface DatingRevision {
+interface SelectedPatient {
   id: string
-  episode_id: string
-  basis: string
-  estimated_due_date: string
-  reason: string
-  revision_sequence: number
-  supersedes_id: string | null
-  version: number
+  facility_id: string
+  local_reference: string
 }
 
-export default function PregnancyManagement({
-  identity,
-  patientId,
-}: {
+export default function PregnancyManagement({ identity, patient }: {
   identity: StaffIdentity
-  patientId: string
+  patient: SelectedPatient
 }) {
-  const [facility, setFacility] = useState(identity.facilities[0]?.id ?? '')
+  const [episodes, setEpisodes] = useState<PregnancyEpisode[]>([])
   const [episode, setEpisode] = useState<PregnancyEpisode | null>(null)
-  const [revisions, setRevisions] = useState<DatingRevision[]>([])
+  const [history, setHistory] = useState<DatingRevision[]>([])
+  const [busy, setBusy] = useState(true)
+  const [loaded, setLoaded] = useState(false)
   const [message, setMessage] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [basis, setBasis] = useState('lmp')
+  const [basis, setBasis] = useState('')
   const [dueDate, setDueDate] = useState('')
   const [reason, setReason] = useState('')
+  const retry = useRef<{ input: string; key: string } | null>(null)
+  const creationKey = useRef(crypto.randomUUID())
+  const canRead = identity.permissions.includes('pregnancy.read')
   const canCreate = identity.permissions.includes('pregnancy.create')
   const canDate = identity.permissions.includes('pregnancy.date')
+  const facilityQuery = `facility_id=${encodeURIComponent(patient.facility_id)}`
 
-  const basisOptions = [
-    { value: 'lmp', label: 'Last menstrual period (LMP)' },
-    { value: 'ultrasound', label: 'Ultrasound dating scan' },
-    { value: 'clinical', label: 'Clinical assessment' },
-    { value: 'fundal_height', label: 'Fundal height measurement' },
-  ]
+  const loadDetail = useCallback(async (id: string, signal?: AbortSignal) => {
+    const path = `/pregnancy-episodes/${encodeURIComponent(id)}`
+    const [detail, revisions] = await Promise.all([
+      apiFetch<PregnancyEpisode>(`${path}?${facilityQuery}`, { signal }),
+      apiFetch<DatingRevision[]>(`${path}/dating-revisions?${facilityQuery}`, { signal }),
+    ])
+    if (!signal?.aborted) {
+      setEpisode(detail)
+      setHistory(revisions)
+    }
+  }, [facilityQuery])
 
-  const createEpisode = useCallback(
-    async (event: FormEvent) => {
-      event.preventDefault()
-      if (!facility) return
-      const body = { patient_id: patientId, facility_id: facility }
-      const key = crypto.randomUUID()
-      setEpisode(null)
-      setRevisions([])
-      setMessage('')
-      setBusy(true)
-      try {
-        const result = await apiFetch<PregnancyEpisode>('/pregnancy-episodes', {
-          method: 'POST',
-          body,
-          idempotencyKey: key,
-        })
-        setEpisode(result)
-        setMessage('Synthetic pregnancy episode created.')
-      } catch {
-        setMessage('Episode could not be created. Retry with the same details.')
-      } finally {
-        setBusy(false)
+  const loadEpisodes = useCallback(async (signal?: AbortSignal) => {
+    const rows = await apiFetch<PregnancyEpisode[]>(
+      `/pregnancy-episodes?patient_id=${encodeURIComponent(patient.id)}&${facilityQuery}`, { signal },
+    )
+    if (signal?.aborted) return
+    setEpisodes(rows)
+    const current = rows.find((row) => row.lifecycle === 'ongoing') ?? rows[0]
+    if (current) await loadDetail(current.id, signal)
+    else { setEpisode(null); setHistory([]) }
+    if (!signal?.aborted) setLoaded(true)
+  }, [patient.id, facilityQuery, loadDetail])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    if (canRead) {
+      void Promise.resolve().then(() => loadEpisodes(controller.signal)).catch(() => {
+        if (!controller.signal.aborted) setMessage('Pregnancy records are unavailable.')
+      }).finally(() => {
+        if (!controller.signal.aborted) setBusy(false)
+      })
+    }
+    return () => controller.abort()
+  }, [canRead, loadEpisodes])
+
+  async function refresh() {
+    setBusy(true)
+    setMessage('')
+    try { await loadEpisodes() }
+    catch { setMessage('Pregnancy records are unavailable.') }
+    finally { setBusy(false) }
+  }
+
+  async function createEpisode() {
+    setBusy(true)
+    setMessage('')
+    try {
+      await apiFetch<PregnancyEpisode>('/pregnancy-episodes', {
+        method: 'POST', body: { patient_id: patient.id, facility_id: patient.facility_id },
+        idempotencyKey: creationKey.current,
+      })
+      creationKey.current = crypto.randomUUID()
+      await loadEpisodes()
+      setMessage('Synthetic pregnancy episode created.')
+    } catch (error) {
+      setMessage(error instanceof ApiError && error.status === 409
+        ? 'An episode already exists or the request conflicts. Refresh the episodes.'
+        : 'Episode could not be created. Retry with the same details.')
+    } finally { setBusy(false) }
+  }
+
+  async function addDatingRevision(event: FormEvent) {
+    event.preventDefault()
+    if (!episode) return
+    const body = { basis: basis.trim(), estimated_due_date: dueDate, reason: reason.trim() }
+    const input = JSON.stringify({ episode: episode.id, facility: patient.facility_id, body })
+    const key = retry.current?.input === input ? retry.current.key : crypto.randomUUID()
+    retry.current = { input, key }
+    setBusy(true)
+    setMessage('')
+    try {
+      await apiFetch<DatingRevision>(
+        `/pregnancy-episodes/${encodeURIComponent(episode.id)}/dating-revisions?${facilityQuery}`, {
+          method: 'POST', body, idempotencyKey: key, ifMatch: `"${episode.version}"`,
+        },
+      )
+      retry.current = null
+      await loadEpisodes()
+      setBasis(''); setDueDate(''); setReason('')
+      setMessage('Dating revision recorded. Previous revisions are preserved.')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 412) {
+        setMessage('The episode changed. Refresh it before recording a correction.')
+      } else {
+        setMessage('Dating revision could not be recorded. Retry with the same details.')
       }
-    },
-    [facility, patientId]
-  )
+    } finally { setBusy(false) }
+  }
 
-  const loadEpisode = useCallback(
-    async (episodeId: string) => {
-      setBusy(true)
-      try {
-        const result = await apiFetch<PregnancyEpisode>(
-          `/pregnancy-episodes/${encodeURIComponent(episodeId)}?facility_id=${encodeURIComponent(facility)}`
-        )
-        setEpisode(result)
-        setMessage('Pregnancy episode loaded.')
-      } catch {
-        setMessage('Episode is unavailable.')
-      } finally {
-        setBusy(false)
-      }
-    },
-    [facility]
-  )
-
-  const addDatingRevision = useCallback(
-    async (event: FormEvent) => {
-      event.preventDefault()
-      if (!episode) return
-      const body = { basis, estimated_due_date: dueDate, reason: reason.trim() }
-      const key = crypto.randomUUID()
-      setBusy(true)
-      try {
-        const result = await apiFetch<DatingRevision>(
-          `/pregnancy-episodes/${encodeURIComponent(episode.id)}/dating-revisions?facility_id=${encodeURIComponent(facility)}`,
-          {
-            method: 'POST',
-            body,
-            idempotencyKey: key,
-          }
-        )
-        setRevisions((prev) => [...prev, result])
-        setMessage('Dating revision recorded.')
-        setBasis('lmp')
-        setDueDate('')
-        setReason('')
-        await loadEpisode(episode.id)
-      } catch {
-        setMessage('Dating revision could not be recorded.')
-      } finally {
-        setBusy(false)
-      }
-    },
-    [episode, basis, dueDate, reason, facility, loadEpisode]
-  )
-
+  if (!canRead) return null
   return (
-    <section className="content-width" aria-labelledby="pregnancy-title">
-      <h1 id="pregnancy-title">Pregnancy episode management</h1>
-      <p>
-        Synthetic patient data only. Dating revisions are append-only; corrections create new
-        revisions and preserve prior history.
-      </p>
-      {canCreate && !episode && (
-        <form onSubmit={createEpisode}>
-          <label>Facility
-            <select
-              value={facility}
-              onChange={(event) => setFacility(event.target.value)}
-              required
-            >
-              <option value="">Select facility</option>
-              {identity.facilities.map((item) => (
-                <option key={item.id} value={item.id}>{item.name}</option>
-              ))}
-            </select>
+    <section className="pregnancy-panel" aria-labelledby="pregnancy-title">
+      <h2 id="pregnancy-title">Pregnancy episodes — {patient.local_reference}</h2>
+      <p>Synthetic data only. D05 clinical dating rules remain unresolved. Recorded dates and
+        methods do not authorize messaging or schedule ANC appointments.</p>
+      <button type="button" onClick={refresh} disabled={busy}>Refresh episodes</button>
+      {canCreate && loaded && !episodes.some((row) => row.lifecycle === 'ongoing') &&
+        <button type="button" onClick={createEpisode} disabled={busy}>Create pregnancy episode</button>}
+      {episodes.length > 0 && <label>Pregnancy episode
+        <select value={episode?.id ?? ''} disabled={busy} onChange={async (event) => {
+          setBusy(true); setEpisode(null); setHistory([])
+          try { await loadDetail(event.target.value) }
+          catch { setMessage('Episode is unavailable.') }
+          finally { setBusy(false) }
+        }}>
+          {episodes.map((row) => <option key={row.id} value={row.id}>{row.lifecycle} — {row.id}</option>)}
+        </select>
+      </label>}
+      {message && <p role="status">{message}</p>}
+      {busy && <p role="status">Loading pregnancy records…</p>}
+      {episode && <>
+        <dl><dt>Lifecycle</dt><dd>{episode.lifecycle}</dd>
+          <dt>Communication</dt><dd>{episode.communication_state}</dd>
+          <dt>Version</dt><dd>{episode.version}</dd></dl>
+        {canDate && episode.lifecycle === 'ongoing' && <form className="dating-form" onSubmit={addDatingRevision}>
+          <h3>Record dating revision</h3>
+          <label>Recorded method
+            <input value={basis} onChange={(event) => setBasis(event.target.value)} required maxLength={64} />
           </label>
-          <button type="submit" disabled={busy || !facility}>
-            Create pregnancy episode
-          </button>
-        </form>
-      )}
-      {episode && (
-        <>
-          <article>
-            <h2>Episode</h2>
-            <p>Patient: {patientId}</p>
-            <p>Lifecycle: {episode.lifecycle}</p>
-            <p>Communication: {episode.communication_state}</p>
-            <p>Version: {episode.version}</p>
-            {episode.dating_summary && (
-              <div>
-                <p>Latest dating revision:</p>
-                <ul>
-                  <li>Basis: {episode.dating_summary.basis}</li>
-                  <li>Estimated due date: {episode.dating_summary.estimated_due_date}</li>
-                  <li>Reason: {episode.dating_summary.reason}</li>
-                  <li>Sequence: {episode.dating_summary.revision_sequence}</li>
-                </ul>
-              </div>
-            )}
-          </article>
-          {canDate && (
-            <form onSubmit={addDatingRevision}>
-              <h3>Add dating revision</h3>
-              <label>Basis
-                <select value={basis} onChange={(event) => setBasis(event.target.value)} required>
-                  {basisOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>Estimated due date
-                <input
-                  type="datetime-local"
-                  value={dueDate}
-                  onChange={(event) => setDueDate(event.target.value)}
-                  required
-                />
-              </label>
-              <label>Reason
-                <textarea
-                  value={reason}
-                  onChange={(event) => setReason(event.target.value)}
-                  required
-                  maxLength={1000}
-                />
-              </label>
-              <button type="submit" disabled={busy}>
-                Record dating revision
-              </button>
-            </form>
-          )}
-          {revisions.length > 0 && (
-            <article>
-              <h3>Dating history</h3>
-              <ul>
-                {revisions.map((rev) => (
-                  <li key={rev.id}>
-                    Sequence {rev.revision_sequence} — {rev.basis} — {rev.estimated_due_date} —{' '}
-                    {rev.reason}{' '}
-                    {rev.supersedes_id ? `(supersedes ${rev.supersedes_id})` : '(initial)'}
-                  </li>
-                ))}
-              </ul>
-            </article>
-          )}
-          {message && <p role="status">{message}</p>}
-        </>
-      )}
+          <label>Estimated due date
+            <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} required />
+          </label>
+          <label>Reason for revision
+            <textarea value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} />
+          </label>
+          <button type="submit" disabled={busy}>Record dating revision</button>
+        </form>}
+        <h3>Dating history</h3>
+        {history.length === 0 ? <p>No dating revisions recorded.</p> : <ol className="dating-history">
+          {history.map((row) => <li key={row.id}>
+            <strong>Revision {row.revision_sequence}: {row.estimated_due_date}</strong>
+            <p>Method: {row.basis}</p><p>Reason: {row.reason}</p>
+            <p>Recorded by {row.recorded_by} at {row.created_at}</p>
+            <p>{row.supersedes_id ? `Supersedes ${row.supersedes_id}` : 'Initial revision'}</p>
+          </li>)}
+        </ol>}
+      </>}
     </section>
   )
 }

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -129,6 +130,12 @@ class PregnancyEpisode(db.Model):
         UniqueConstraint(
             "facility_id", "idempotency_key", name="uq_pregnancy_episode_facility_idempotency_key"
         ),
+        Index(
+            "uq_pregnancy_episode_ongoing_patient",
+            "patient_id",
+            unique=True,
+            postgresql_where=text("lifecycle = 'ongoing'"),
+        ),
         CheckConstraint("lifecycle IN ('ongoing', 'completed')", name="lifecycle_values"),
         CheckConstraint(
             "communication_state IN ('active', 'paused', 'completed', 'withdrawn')",
@@ -159,6 +166,11 @@ class PregnancyEpisode(db.Model):
     communication_state: Mapped[str] = mapped_column(String(16), nullable=False, default="paused")
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", name="fk_episodes_created_by_users", ondelete="RESTRICT"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -281,8 +293,8 @@ class PregnancyDatingRevision(db.Model):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["supersedes_id"],
-            ["pregnancy_dating_revisions.id"],
+            ["supersedes_id", "episode_id"],
+            ["pregnancy_dating_revisions.id", "pregnancy_dating_revisions.episode_id"],
             name="fk_dating_revisions_supersedes_dating_revision",
             ondelete="RESTRICT",
         ),
@@ -293,14 +305,20 @@ class PregnancyDatingRevision(db.Model):
             ondelete="RESTRICT",
         ),
         UniqueConstraint("id", "facility_id", name="uq_pregnancy_dating_revision_id_facility"),
+        UniqueConstraint("id", "episode_id", name="uq_dating_revision_id_episode"),
         UniqueConstraint(
             "episode_id",
             "patient_id",
             "revision_sequence",
             name="uq_pregnancy_dating_revision_episode_sequence",
         ),
+        UniqueConstraint(
+            "facility_id",
+            "idempotency_key",
+            name="uq_pregnancy_dating_revision_facility_idempotency_key",
+        ),
         CheckConstraint(
-            "basis IN ('lmp', 'ultrasound', 'clinical', 'fundal_height')",
+            "char_length(trim(basis)) BETWEEN 1 AND 64",
             name="ck_pregnancy_dating_revision_basis_values",
         ),
         CheckConstraint(
@@ -318,10 +336,13 @@ class PregnancyDatingRevision(db.Model):
     episode_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     patient_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     facility_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
-    basis: Mapped[str] = mapped_column(String(32), nullable=False)
-    estimated_due_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    basis: Mapped[str] = mapped_column(String(64), nullable=False)
+    estimated_due_date: Mapped[date] = mapped_column(Date, nullable=False)
     reason: Mapped[str] = mapped_column(String(1000), nullable=False)
     recorded_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    request_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    parent_version: Mapped[int] = mapped_column(Integer, nullable=False)
     revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

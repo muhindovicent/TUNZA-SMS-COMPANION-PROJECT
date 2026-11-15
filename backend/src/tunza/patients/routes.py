@@ -250,7 +250,13 @@ def register_patient() -> tuple[Response, int]:
         id=uuid4(), patient_id=patient.id, facility_id=facility_id, language=language
     )
     episode = PregnancyEpisode(
-        id=uuid4(), patient_id=patient.id, lifecycle="ongoing", communication_state="paused"
+        id=uuid4(),
+        patient_id=patient.id,
+        facility_id=facility_id,
+        lifecycle="ongoing",
+        communication_state="paused",
+        request_hash=request_hash,
+        created_by=context.user.id,
     )
     facility_assignment = EpisodeFacilityAssignment(
         id=uuid4(),

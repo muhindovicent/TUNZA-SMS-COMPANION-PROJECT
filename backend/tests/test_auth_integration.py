@@ -2301,8 +2301,47 @@ def test_evidence_audit_failure_rolls_back(client, identity, monkeypatch):
 
 
 def _register_synthetic_patient_for_pregnancy(client, facility_id, reference_suffix="PREG"):
-    """Register a synthetic patient and return patient_id."""
-    return _register_synthetic_patient(client, facility_id, reference_suffix)
+    """Prepare a subsequent-episode scenario; completion is a privileged test fixture.
+
+    Registration already creates an ongoing episode. Do not make the production
+    API create a duplicate to satisfy these subsequent-episode tests.
+    """
+    patient_id = _register_synthetic_patient(client, facility_id, reference_suffix)
+    owner = create_engine(postgres_url(os.environ["TEST_MIGRATION_DATABASE_URL"]))
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE pregnancy_episodes SET lifecycle = 'completed' "
+                    "WHERE patient_id = :patient"
+                ),
+                {"patient": patient_id},
+            )
+    finally:
+        owner.dispose()
+    return patient_id
+
+
+def _assign_pregnancy_staff(identity, episode_id, login):
+    """Explicitly assign a second care worker; same facility alone grants no access."""
+    owner = create_engine(postgres_url(os.environ["TEST_MIGRATION_DATABASE_URL"]))
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO participant_assignments
+                    (id, episode_facility_assignment_id, facility_id, membership_id,
+                     duty, valid_from, version)
+                SELECT :id, a.id, a.facility_id, m.id, 'primary', now(), 1
+                FROM episode_facility_assignments a
+                JOIN facility_memberships m ON m.facility_id = a.facility_id
+                JOIN users u ON u.id = m.user_id
+                WHERE a.episode_id = :episode AND u.login_identifier = :login
+            """),
+                {"id": uuid4(), "episode": episode_id, "login": login},
+            )
+    finally:
+        owner.dispose()
 
 
 def test_pregnancy_episode_create_and_read(client, identity):
@@ -2449,17 +2488,19 @@ def test_pregnancy_dating_revision_create_and_history(client, identity):
     episode_id = episode_response.json["data"]["id"]
 
     # First dating revision
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.a")
     rev_key_1 = str(uuid4())
     rev_response_1 = client_hcw.post(
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "lmp",
-            "estimated_due_date": "2027-06-15T00:00:00+00:00",
+            "estimated_due_date": "2027-06-15",
             "reason": "Last menstrual period based estimate.",
         },
         headers={
             "X-CSRF-Token": _csrf(client_hcw),
             "Idempotency-Key": rev_key_1,
+            "If-Match": '"1"',
         },
     )
     assert rev_response_1.status_code == 201, rev_response_1.json
@@ -2474,12 +2515,13 @@ def test_pregnancy_dating_revision_create_and_history(client, identity):
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "ultrasound",
-            "estimated_due_date": "2027-06-20T00:00:00+00:00",
+            "estimated_due_date": "2027-06-20",
             "reason": "Ultrasound dating scan revised the due date.",
         },
         headers={
             "X-CSRF-Token": _csrf(client_hcw),
             "Idempotency-Key": rev_key_2,
+            "If-Match": '"2"',
         },
     )
     assert rev_response_2.status_code == 201, rev_response_2.json
@@ -2552,12 +2594,13 @@ def test_pregnancy_dating_idempotent_replay(client, identity):
     episode_id = episode_response.json["data"]["id"]
 
     rev_key = str(uuid4())
-    headers = {"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": rev_key}
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.b")
+    headers = {"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": rev_key, "If-Match": '"1"'}
     response = client_hcw.post(
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "clinical",
-            "estimated_due_date": "2027-07-01T00:00:00+00:00",
+            "estimated_due_date": "2027-07-01",
             "reason": "Clinical assessment dating.",
         },
         headers=headers,
@@ -2569,7 +2612,7 @@ def test_pregnancy_dating_idempotent_replay(client, identity):
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "clinical",
-            "estimated_due_date": "2027-07-01T00:00:00+00:00",
+            "estimated_due_date": "2027-07-01",
             "reason": "Clinical assessment dating.",
         },
         headers=headers,
@@ -2633,12 +2676,13 @@ def test_pregnancy_dating_conflicting_idempotency_key(client, identity):
     episode_id = episode_response.json["data"]["id"]
 
     rev_key = str(uuid4())
-    headers = {"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": rev_key}
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.c")
+    headers = {"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": rev_key, "If-Match": '"1"'}
     response = client_hcw.post(
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "lmp",
-            "estimated_due_date": "2027-08-01T00:00:00+00:00",
+            "estimated_due_date": "2027-08-01",
             "reason": "Initial dating estimate.",
         },
         headers=headers,
@@ -2649,7 +2693,7 @@ def test_pregnancy_dating_conflicting_idempotency_key(client, identity):
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "ultrasound",
-            "estimated_due_date": "2027-08-15T00:00:00+00:00",
+            "estimated_due_date": "2027-08-15",
             "reason": "Different dating basis and due date.",
         },
         headers=headers,
@@ -2714,16 +2758,21 @@ def test_pregnancy_dating_audit_failure_rolls_back(client, identity, monkeypatch
     def fail_audit(**_kwargs):
         raise SQLAlchemyError("synthetic audit failure")
 
+    _assign_pregnancy_staff(identity, episode_id, "tst.hcw.d")
     with monkeypatch.context() as patch:
         patch.setattr(pregnancy_routes, "_record_pregnancy_audit", fail_audit)
         response = client_hcw.post(
             f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
             json={
                 "basis": "lmp",
-                "estimated_due_date": "2027-09-01T00:00:00+00:00",
+                "estimated_due_date": "2027-09-01",
                 "reason": "Audit rollback test.",
             },
-            headers={"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": str(uuid4())},
+            headers={
+                "X-CSRF-Token": _csrf(client_hcw),
+                "Idempotency-Key": str(uuid4()),
+                "If-Match": '"1"',
+            },
         )
         assert response.status_code == 503, response.json
 
@@ -2740,9 +2789,13 @@ def test_pregnancy_dating_audit_failure_rolls_back(client, identity, monkeypatch
         f"/api/v1/pregnancy-episodes/{episode_id}/dating-revisions?facility_id={facility_id}",
         json={
             "basis": "lmp",
-            "estimated_due_date": "2027-09-01T00:00:00+00:00",
+            "estimated_due_date": "2027-09-01",
             "reason": "Audit rollback test.",
         },
-        headers={"X-CSRF-Token": _csrf(client_hcw), "Idempotency-Key": str(uuid4())},
+        headers={
+            "X-CSRF-Token": _csrf(client_hcw),
+            "Idempotency-Key": str(uuid4()),
+            "If-Match": '"1"',
+        },
     )
     assert retry_response.status_code == 201, retry_response.json

@@ -7,7 +7,6 @@ import { hasAdminPermission } from '../api/admin'
 import AdminPanel from './AdminPanel'
 import BrandMark from './BrandMark'
 import PatientRegistry from './PatientRegistry'
-import PregnancyManagement from './PregnancyManagement'
 import EligibilityConsent from './EligibilityConsent'
 
 interface StaffShellProps {
@@ -15,7 +14,7 @@ interface StaffShellProps {
   onSignedOut: () => void
 }
 
-type ShellView = 'overview' | 'admin' | 'patients' | 'pregnancy' | 'eligibility'
+type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility'
 
 function ConnectionCard({
   title,
@@ -66,9 +65,6 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
   const showAdmin = hasAdminPermission(identity.permissions)
   const showPatients = identity.permissions.some((permission) =>
     ['patient.read', 'patient.register'].includes(permission),
-  )
-  const showPregnancy = identity.permissions.some((permission) =>
-    ['pregnancy.create', 'pregnancy.read', 'pregnancy.date'].includes(permission),
   )
   const showEligibilityConsent = identity.permissions.some((permission) =>
     ['eligibility.record', 'consent.record', 'consent.read'].includes(permission),
@@ -141,10 +137,6 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
             <button type="button" className={view === 'patients' ? 'nav-link is-active' : 'nav-link'}
               onClick={() => setView('patients')}>Patient registry</button>
           ) : null}
-          {showPregnancy ? (
-            <button type="button" className={view === 'pregnancy' ? 'nav-link is-active' : 'nav-link'}
-              onClick={() => setView('pregnancy')}>Pregnancy management</button>
-          ) : null}
           {showEligibilityConsent ? (
             <button type="button" className={view === 'eligibility' ? 'nav-link is-active' : 'nav-link'}
               onClick={() => setView('eligibility')}>Eligibility &amp; consent</button>
@@ -187,8 +179,6 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
           <PatientRegistry identity={identity} />
         ) : view === 'eligibility' && showEligibilityConsent ? (
           <EligibilityConsent identity={identity} />
-        ) : view === 'pregnancy' && showPregnancy ? (
-          <PregnancyManagement identity={identity} patientId="" />
         ) : view === 'admin' && showAdmin ? (
           <AdminPanel identity={identity} />
         ) : (

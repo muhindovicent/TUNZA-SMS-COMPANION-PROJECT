@@ -2,6 +2,8 @@
 
 import os
 import secrets
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -196,3 +198,163 @@ def test_postgres_migration_roundtrip_and_readiness():
             db.session.remove()
             db.engine.dispose()
             migration_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("legacy_state", ["valid", "duplicate", "orphan"])
+def test_0009_populated_upgrade_preserves_records_or_fails_atomically(legacy_state):
+    runtime_value = os.environ.get("TEST_DATABASE_URL")
+    migration_value = os.environ.get("TEST_MIGRATION_DATABASE_URL")
+    if not runtime_value or not migration_value:
+        pytest.skip("Dedicated disposable PostgreSQL runtime and owner URLs are required.")
+    url = postgres_url(runtime_value)
+    owner_url = postgres_url(migration_value)
+    assert url.host in {"127.0.0.1", "localhost", "::1"}
+    assert url.database.startswith("tunza_") and url.database.endswith("_test")
+    assert (owner_url.host, owner_url.port, owner_url.database) == (
+        url.host,
+        url.port,
+        url.database,
+    )
+    assert owner_url.username != url.username
+    app = create_app(
+        {
+            "APP_ENV": "testing",
+            "SECRET_KEY": secrets.token_urlsafe(48),
+            "DATABASE_URL": runtime_value,
+            "MIGRATION_DATABASE_URL": migration_value,
+        }
+    )
+    engine = create_engine(owner_url)
+    runner = app.test_cli_runner()
+    patient, episode, historical, facility, profile = (uuid4() for _ in range(5))
+    try:
+        with app.app_context():
+            db.session.remove()
+            # The preceding roundtrip test may leave an empty schema at head.
+            assert runner.invoke(args=["db", "downgrade", "base"]).exit_code == 0
+            result = runner.invoke(args=["db", "upgrade", "0008_evidence_idempotency"])
+            assert result.exit_code == 0, result.output
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO facilities (id, code, name, timezone, active) "
+                    "VALUES (:id, 'SYN-UPGRADE', 'Synthetic upgrade clinic', "
+                    "'Africa/Kampala', true)"
+                ),
+                {"id": facility},
+            )
+            connection.execute(text("INSERT INTO patients (id) VALUES (:id)"), {"id": patient})
+            connection.execute(
+                text(
+                    "INSERT INTO facility_patient_profiles "
+                    "(id, patient_id, facility_id, local_reference, demographics_cipher, "
+                    "key_version, status) VALUES (:id, :patient, :facility, 'SYN-ADULT-UPGRADE', "
+                    ":cipher, 'synthetic', 'synthetic')"
+                ),
+                {
+                    "id": profile,
+                    "patient": patient,
+                    "facility": facility,
+                    "cipher": b"synthetic-legacy-cipher",
+                },
+            )
+            for identifier, lifecycle in ((episode, "ongoing"), (historical, "completed")):
+                connection.execute(
+                    text(
+                        "INSERT INTO pregnancy_episodes "
+                        "(id, patient_id, lifecycle, communication_state, version) "
+                        "VALUES (:id, :patient, :lifecycle, 'paused', 7)"
+                    ),
+                    {"id": identifier, "patient": patient, "lifecycle": lifecycle},
+                )
+                if legacy_state != "orphan" or identifier != episode:
+                    connection.execute(
+                        text(
+                            "INSERT INTO episode_facility_assignments "
+                            "(id, episode_id, patient_id, facility_id, valid_from, valid_to) "
+                            "VALUES (:id, :episode, :patient, :facility, "
+                            "now() - interval '2 days', :end)"
+                        ),
+                        {
+                            "id": uuid4(),
+                            "episode": identifier,
+                            "patient": patient,
+                            "facility": facility,
+                            "end": None
+                            if lifecycle == "ongoing"
+                            else datetime.now(UTC) - timedelta(days=1),
+                        },
+                    )
+            if legacy_state == "duplicate":
+                connection.execute(
+                    text(
+                        "INSERT INTO pregnancy_episodes "
+                        "(id, patient_id, lifecycle, communication_state, version) "
+                        "VALUES (:id, :patient, 'ongoing', 'paused', 1)"
+                    ),
+                    {"id": uuid4(), "patient": patient},
+                )
+        result = runner.invoke(args=["db", "upgrade"])
+        if legacy_state != "valid":
+            assert result.exit_code != 0
+            assert "Resolve" in str(result.exception)
+            with engine.connect() as connection:
+                assert (
+                    connection.scalar(text("SELECT version_num FROM alembic_version"))
+                    == "0008_evidence_idempotency"
+                )
+                assert "facility_id" not in {
+                    c["name"] for c in inspect(connection).get_columns("pregnancy_episodes")
+                }
+                assert (
+                    connection.scalar(
+                        text("SELECT version FROM pregnancy_episodes WHERE id = :id"),
+                        {"id": episode},
+                    )
+                    == 7
+                )
+            return
+        assert result.exit_code == 0, result.output
+        for _ in range(2):
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT id, facility_id, version, created_by "
+                        "FROM pregnancy_episodes ORDER BY id"
+                    )
+                ).all()
+                assert {row.id for row in rows} == {episode, historical}
+                assert all(
+                    row.facility_id == facility and row.version == 7 and row.created_by is None
+                    for row in rows
+                )
+                assert (
+                    connection.scalar(
+                        text(
+                            "SELECT demographics_cipher FROM facility_patient_profiles "
+                            "WHERE id = :id"
+                        ),
+                        {"id": profile},
+                    )
+                    == b"synthetic-legacy-cipher"
+                )
+                assert connection.scalar(
+                    text(
+                        "SELECT relforcerowsecurity FROM pg_class "
+                        "WHERE oid = 'pregnancy_dating_revisions'::regclass"
+                    )
+                )
+            result = runner.invoke(args=["db", "check"])
+            assert result.exit_code == 0, result.output
+            result = runner.invoke(args=["db", "downgrade", "0008_evidence_idempotency"])
+            assert result.exit_code == 0, result.output
+            result = runner.invoke(args=["db", "upgrade"])
+            assert result.exit_code == 0, result.output
+    finally:
+        with app.app_context():
+            db.session.remove()
+            result = runner.invoke(args=["db", "downgrade", "base"])
+            assert result.exit_code == 0, result.output
+            db.engine.dispose()
+        engine.dispose()
