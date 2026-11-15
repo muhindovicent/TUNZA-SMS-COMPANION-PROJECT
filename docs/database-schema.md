@@ -483,6 +483,12 @@ technical fixture decisions with `clinical_signoff = false`; the draft
 `clinical_approvals` table below is not implemented. Reference schedules, patient
 SMS responses, escalation and messaging tables remain future contracts.
 
+Stabilization migration `0015_content_counter_guard` adds a unique audit FK to new
+content events and makes template counters trigger-derived; application logins
+have no direct template-counter UPDATE privilege. Historical events/ciphertext and
+existing counters are preserved. See the Phase 5A guide for trigger authorization,
+audit provenance and downgrade behavior.
+
 | Entity | Additional columns / references | Keys and checks |
 | --- | --- | --- |
 | `anc_reference_schedule_versions` | `code text!`, `revision integer!`, `source_reference text!`, `approval_reference text?`, `status text!` | Unique `(code,revision)`; effective schedule requires clinical approval D06 |

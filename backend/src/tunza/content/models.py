@@ -138,6 +138,7 @@ class ContentEvent(db.Model):
     __tablename__ = "content_events"
     __table_args__ = (
         sa.UniqueConstraint("version_id", "sequence", name="uq_content_event_sequence"),
+        sa.UniqueConstraint("audit_event_id", name="uq_content_event_audit"),
         sa.CheckConstraint("sequence > 0", name="content_event_sequence"),
     )
     id: Mapped[UUID] = mapped_column(sa.Uuid, primary_key=True, default=uuid4)
@@ -148,6 +149,10 @@ class ContentEvent(db.Model):
     event_type: Mapped[str] = mapped_column(sa.String(32), nullable=False)
     actor_id: Mapped[UUID] = mapped_column(
         sa.Uuid, sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    audit_event_id: Mapped[UUID | None] = mapped_column(
+        sa.Uuid,
+        sa.ForeignKey("audit_events.id", name="fk_content_event_audit", ondelete="RESTRICT"),
     )
     event_data_cipher: Mapped[bytes] = mapped_column(sa.LargeBinary, nullable=False)
     key_version: Mapped[str] = mapped_column(sa.String(64), nullable=False)

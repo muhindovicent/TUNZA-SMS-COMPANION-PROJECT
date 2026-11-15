@@ -47,7 +47,7 @@ def _error(code, message, status):
 
 
 def _audit(context, permission, action, resource=None, outcome="success", state=None):
-    record_audit(
+    return record_audit(
         permission=permission,
         action=action,
         resource_type="content",
@@ -282,7 +282,7 @@ def _normalize(action, payload):
     return {"reason": reason}
 
 
-def _event(row, action, actor, reason=None):
+def _event(row, action, actor, audit_id, reason=None):
     db.session.add(
         ContentEvent(
             id=uuid4(),
@@ -290,6 +290,7 @@ def _event(row, action, actor, reason=None):
             sequence=row.version,
             event_type=action,
             actor_id=actor,
+            audit_event_id=audit_id,
             event_data_cipher=_crypt(
                 {
                     "digest": row.content_digest.hex(),
@@ -368,10 +369,15 @@ def _write(action, target=None):
                 if row is None:
                     return _deny(context, permission)
                 template_id = row.template_id
+            # Counter UPDATE is trigger-only, so parent serialization uses a
+            # transaction advisory lock instead of SELECT FOR UPDATE privileges.
+            db.session.execute(
+                sa.text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _advisory_lock_key("content.template", template_id, template_id)},
+            )
             template = db.session.scalar(
                 select(MessageTemplate)
                 .where(MessageTemplate.id == template_id)
-                .with_for_update()
                 .execution_options(populate_existing=True)
             )
             if template is None or (action == "create" and template.created_by != context.user.id):
@@ -487,7 +493,14 @@ def _write(action, target=None):
                 else:
                     row.state = "suspended" if action == "suspend" else "retired"
                 row.version += 1
-            template.version += 1
+        db.session.flush()
+        audit = _audit(
+            context,
+            permission,
+            operation,
+            row.id if row else template.id,
+            state=row.state if row else None,
+        )
         db.session.flush()
         if row:
             event_type = (
@@ -497,8 +510,9 @@ def _write(action, target=None):
                 if action == "edit"
                 else row.state
             )
-            _event(row, event_type, context.user.id, body.get("reason"))
+            _event(row, event_type, context.user.id, audit.id, body.get("reason"))
             db.session.flush()
+            db.session.refresh(template, ["version"])
         data = _version_data(row, template) if row else _template_data(template)
         status = 201 if action in {"template", "create", "review"} else 200
         db.session.add(
@@ -514,13 +528,6 @@ def _write(action, target=None):
                 response_status=status,
                 key_version=current_app.config["PATIENT_KEY_VERSION"],
             )
-        )
-        _audit(
-            context,
-            permission,
-            operation,
-            row.id if row else template.id,
-            state=row.state if row else None,
         )
         db.session.commit()
         return _response(data, status)

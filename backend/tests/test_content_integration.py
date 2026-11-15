@@ -27,10 +27,27 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module", autouse=True)
-def content_staff(identity):
+def content_staff(identity, owner):
+    with owner.begin() as connection:
+        reader_role = uuid4()
+        connection.execute(
+            text(
+                "INSERT INTO roles (id,code,name,scope_kind) VALUES "
+                "(:id,'SYN-CONTENT-READER','Synthetic content reader','programme')"
+            ),
+            {"id": reader_role},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO role_permissions (role_id,permission_id) "
+                "SELECT :role,id FROM permissions WHERE code = 'content.read'"
+            ),
+            {"role": reader_role},
+        )
     with identity.app.app_context():
         roles = {role.code: role for role in db.session.scalars(select(Role)).all()}
         for login, code in (
+            ("content.reader", "SYN-CONTENT-READER"),
             ("content.author2", "AUTHOR"),
             ("content.reviewer", "REVIEWER"),
             ("content.reviewer2", "REVIEWER"),
@@ -493,6 +510,13 @@ def test_audit_failure_rolls_back_lifecycle_events_and_key(clients, owner, monke
     with owner.connect() as connection:
         assert (
             connection.scalar(
+                text("SELECT version FROM message_templates WHERE id = :id"),
+                {"id": row["template_id"]},
+            )
+            == row["template_version"]
+        )
+        assert (
+            connection.scalar(
                 text("SELECT state FROM template_versions WHERE id = :id"), {"id": row["id"]}
             )
             == row["state"]
@@ -870,3 +894,351 @@ def test_read_and_replay_audit_failures_disclose_no_payload(clients, monkeypatch
         assert result.status_code == 503 and "data" not in result.json
     replay = transition(clients["reviewer"], row, "publish", WINDOW, key=key)
     assert replay.status_code == 503 and "data" not in replay.json
+
+
+@pytest.mark.parametrize("login", ["content.reader", "tst.author", "content.reviewer"])
+@pytest.mark.parametrize("database", ["TEST_DATABASE_URL", "TEST_FIXTURE_DATABASE_URL"])
+def test_direct_template_counter_updates_denied_even_with_forged_flags(
+    clients, owner, login, database
+):
+    from tunza.fixture_database import provision_fixture_role
+
+    parent = template(clients["author"])
+    if database == "TEST_FIXTURE_DATABASE_URL":
+        provision_fixture_role(os.environ["TEST_MIGRATION_DATABASE_URL"], environment="testing")
+    runtime = create_engine(postgres_url(os.environ[database]))
+    try:
+        with pytest.raises(DBAPIError, match="permission denied"), runtime.begin() as connection:
+            actor = connection.scalar(
+                text("SELECT id FROM users WHERE login_identifier = :login"), {"login": login}
+            )
+            connection.execute(
+                text(
+                    "SELECT set_config('tunza.actor_id', :actor, true), "
+                    "set_config('tunza.content_operation', 'content.review', true), "
+                    "set_config('tunza.content_write', 'true', true)"
+                ),
+                {"actor": str(actor)},
+            )
+            assert connection.scalar(text("SELECT tunza_content_permission('content.read')"))
+            if login == "content.reader":
+                for permission in ("author", "submit", "review", "publish", "suspend"):
+                    assert not connection.scalar(
+                        text("SELECT tunza_content_permission(:permission)"),
+                        {"permission": "content." + permission},
+                    )
+            assert (
+                connection.scalar(
+                    text("SELECT version FROM message_templates WHERE id = :id"),
+                    {"id": parent["id"]},
+                )
+                == 1
+            )
+            assert not connection.scalar(
+                text(
+                    "SELECT has_column_privilege(current_user, "
+                    "'message_templates', 'version', 'UPDATE')"
+                )
+            )
+            assert not connection.scalar(
+                text(
+                    "SELECT has_function_privilege(current_user, "
+                    "'tunza_content_advance_template()', 'EXECUTE')"
+                )
+            )
+            connection.execute(
+                text("UPDATE message_templates SET version = version + 1 WHERE id = :id"),
+                {"id": parent["id"]},
+            )
+        with owner.connect() as connection:
+            assert (
+                connection.scalar(
+                    text("SELECT version FROM message_templates WHERE id = :id"),
+                    {"id": parent["id"]},
+                )
+                == 1
+            )
+    finally:
+        runtime.dispose()
+
+
+@pytest.mark.parametrize("audit_kind", ["missing", "wrong_operation", "historical", "reused"])
+def test_counter_event_requires_unique_matching_current_transaction_audit(
+    clients, owner, audit_kind
+):
+    parent = template(clients["author"])
+    row = draft(clients["author"], parent)
+    audit_id = None if audit_kind == "missing" else uuid4()
+    audit_sql = text("""
+        INSERT INTO audit_events (id,actor_id,request_id,permission,action,resource_type,
+                                  resource_id,outcome,metadata)
+        VALUES (:id,:actor,:request,'content.author',:action,'content',:resource,'success',
+                '{"state":"draft"}'::jsonb)
+    """)
+    audit_params = {
+        "id": audit_id,
+        "actor": row["author_id"],
+        "request": uuid4(),
+        "action": "content.edit",
+        "resource": row["id"],
+    }
+    if audit_kind == "historical":
+        with owner.begin() as connection:
+            connection.execute(audit_sql, audit_params)
+    if audit_kind == "reused":
+        with owner.connect() as connection:
+            audit_id = connection.scalar(
+                text("SELECT audit_event_id FROM content_events WHERE version_id = :id"),
+                {"id": row["id"]},
+            )
+    runtime = create_engine(postgres_url(os.environ["TEST_DATABASE_URL"]))
+    try:
+        expected_error = (
+            "uq_content_event_audit"
+            if audit_kind == "reused"
+            else "Authorized content operation and current audit required"
+        )
+        with pytest.raises(DBAPIError, match=expected_error), runtime.begin() as connection:
+            connection.execute(
+                text("SELECT set_config('tunza.actor_id', :actor, true)"),
+                {"actor": row["author_id"]},
+            )
+            connection.execute(
+                text("UPDATE template_versions SET version = version + 1 WHERE id = :id"),
+                {"id": row["id"]},
+            )
+            if audit_kind == "wrong_operation":
+                connection.execute(audit_sql, {**audit_params, "action": "content.read"})
+            connection.execute(
+                text("""
+                INSERT INTO content_events
+                    (id,version_id,sequence,event_type,actor_id,audit_event_id,
+                     event_data_cipher,key_version)
+                VALUES (:id,:version,2,'draft_edited',:actor,:audit,:cipher,'synthetic-v1')
+            """),
+                {
+                    "id": uuid4(),
+                    "version": row["id"],
+                    "actor": row["author_id"],
+                    "audit": audit_id,
+                    "cipher": b"synthetic-rolled-back-event",
+                },
+            )
+        with owner.connect() as connection:
+            assert (
+                connection.scalar(
+                    text("SELECT version FROM message_templates WHERE id = :id"),
+                    {"id": parent["id"]},
+                )
+                == 2
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT version FROM template_versions WHERE id = :id"), {"id": row["id"]}
+                )
+                == 1
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT count(*) FROM content_events WHERE version_id = :id"),
+                    {"id": row["id"]},
+                )
+                == 1
+            )
+    finally:
+        runtime.dispose()
+
+
+def test_template_counter_tracks_author_reviewer_events_once_and_replay_does_not_advance(
+    clients, owner
+):
+    parent = template(clients["author"])
+    row = draft(clients["author"], parent)
+    assert row["template_version"] == 2
+    edited = mutate(
+        clients["author"],
+        f"/template-versions/{row['id']}",
+        {"text": placeholder(token="DEADBEEF"), "allowed_parameters": []},
+        version=row["version"],
+        method="PATCH",
+    ).json["data"]
+    assert edited["template_version"] == 3
+    row = transition(clients["author"], edited, "submit").json["data"]
+    assert row["template_version"] == 4
+    review = {
+        "decision": "approve",
+        "reason": "SYN-REVIEW",
+        "content_digest": row["content_digest"],
+    }
+    key = str(uuid4())
+    first = transition(clients["reviewer"], row, "review", review, key=key)
+    assert first.status_code == 201 and first.json["data"]["template_version"] == 5
+    assert transition(clients["reviewer"], row, "review", review, key=key).json == first.json
+    current = first.json["data"]
+    for counter, (action, body) in enumerate(
+        [
+            ("publish", WINDOW),
+            ("suspend", {"reason": "SYN-HOLD"}),
+            ("publish", WINDOW),
+            ("retire", {"reason": "SYN-RETIRE"}),
+        ],
+        start=6,
+    ):
+        result = transition(clients["reviewer"], current, action, body)
+        assert result.status_code == 200, result.json
+        current = result.json["data"]
+        assert current["template_version"] == counter
+    with owner.connect() as connection:
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(DISTINCT e.audit_event_id) FROM content_events e "
+                    "JOIN audit_events a ON a.id = e.audit_event_id "
+                    "WHERE e.version_id = :id AND a.actor_id = e.actor_id "
+                    "AND a.resource_id = e.version_id AND a.outcome = 'success'"
+                ),
+                {"id": row["id"]},
+            )
+            == 8
+        )
+
+
+@pytest.mark.parametrize("action", ["create", "review"])
+def test_failure_after_counter_trigger_rolls_back_counter_event_audit_and_replay(
+    clients, owner, monkeypatch, action
+):
+    import tunza.content.routes as routes
+
+    parent = template(clients["author"])
+    row = draft(clients["author"], parent)
+    if action == "review":
+        row = transition(clients["author"], row, "submit").json["data"]
+    tables = ("content_events", "content_reviews", "audit_events", "content_idempotency")
+    with owner.connect() as connection:
+        before = {
+            table: connection.scalar(text(f"SELECT count(*) FROM {table}")) for table in tables
+        }
+    encrypt = routes._crypt
+
+    def fail(value, purpose):
+        if purpose == "content-response":
+            raise ValueError("Synthetic failure after the counter trigger")
+        return encrypt(value, purpose)
+
+    monkeypatch.setattr(routes, "_crypt", fail)
+    if action == "review":
+        response = transition(
+            clients["reviewer"],
+            row,
+            "review",
+            {
+                "decision": "approve",
+                "reason": "SYN-REVIEW",
+                "content_digest": row["content_digest"],
+            },
+        )
+    else:
+        response = mutate(
+            clients["author"],
+            "/template-versions",
+            {
+                "template_id": parent["id"],
+                "language": "lg",
+                "text": placeholder("lg"),
+                "allowed_parameters": [],
+            },
+            version=row["template_version"],
+        )
+    assert response.status_code == 503 and "data" not in response.json
+    with owner.connect() as connection:
+        for table, count in before.items():
+            assert connection.scalar(text(f"SELECT count(*) FROM {table}")) == count
+        assert (
+            connection.scalar(
+                text("SELECT version FROM message_templates WHERE id = :id"), {"id": parent["id"]}
+            )
+            == row["template_version"]
+        )
+        assert (
+            connection.scalar(
+                text("SELECT state FROM template_versions WHERE id = :id"), {"id": row["id"]}
+            )
+            == row["state"]
+        )
+
+
+def test_counter_guard_populated_upgrade_preserves_history_and_revokes_both_logins(
+    clients, owner, identity
+):
+    from tunza.fixture_database import provision_fixture_role
+
+    provision_fixture_role(os.environ["TEST_MIGRATION_DATABASE_URL"], environment="testing")
+    parent = template(clients["author"])
+    row = draft(clients["author"], parent)
+    runner = identity.app.test_cli_runner()
+    snapshot_sql = text(
+        "SELECT id,version_id,sequence,event_type,actor_id,event_data_cipher,"
+        "key_version,created_at FROM content_events ORDER BY id"
+    )
+    with owner.connect() as connection:
+        snapshot = connection.execute(snapshot_sql).all()
+    try:
+        with identity.app.app_context():
+            db.session.remove()
+            result = runner.invoke(args=["db", "downgrade", "0014_clinical_content"])
+            assert result.exit_code == 0, result.output
+        with owner.connect() as connection:
+            assert connection.execute(snapshot_sql).all() == snapshot
+            for role in ("tunza_runtime", "tunza_fixture_runtime"):
+                assert connection.scalar(
+                    text(
+                        "SELECT has_column_privilege(:role, "
+                        "'message_templates', 'version', 'UPDATE')"
+                    ),
+                    {"role": role},
+                )
+        with identity.app.app_context():
+            result = runner.invoke(args=["db", "upgrade"])
+            assert result.exit_code == 0, result.output
+            result = runner.invoke(args=["db", "check"])
+            assert result.exit_code == 0, result.output
+        with owner.connect() as connection:
+            assert connection.execute(snapshot_sql).all() == snapshot
+            assert (
+                connection.scalar(
+                    text("SELECT count(*) FROM content_events WHERE audit_event_id IS NOT NULL")
+                )
+                == 0
+            )
+            for role in ("tunza_runtime", "tunza_fixture_runtime"):
+                assert not connection.scalar(
+                    text(
+                        "SELECT has_column_privilege(:role, "
+                        "'message_templates', 'version', 'UPDATE')"
+                    ),
+                    {"role": role},
+                )
+        edited = mutate(
+            clients["author"],
+            f"/template-versions/{row['id']}",
+            {
+                "text": placeholder(token="DEADBEEF"),
+                "allowed_parameters": [],
+            },
+            version=1,
+            method="PATCH",
+        )
+        assert edited.status_code == 200, edited.json
+        assert edited.json["data"]["template_version"] == 3
+        with owner.connect() as connection:
+            assert (
+                connection.scalar(
+                    text("SELECT count(*) FROM content_events WHERE audit_event_id IS NOT NULL")
+                )
+                == 1
+            )
+    finally:
+        with identity.app.app_context():
+            db.session.remove()
+            result = runner.invoke(args=["db", "upgrade"])
+            assert result.exit_code == 0, result.output

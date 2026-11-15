@@ -111,17 +111,19 @@ Additive migration `0014_clinical_content` introduces:
 | `message_templates` | Immutable synthetic metadata, original author, optimistic counter |
 | `template_versions` | Unique template/language/revision, authenticated ciphertext, digest, lifecycle, immutable publication interval and optimistic counter |
 | `content_reviews` | One immutable exact-digest decision/version; independent author/reviewer FKs; encrypted reason; clinical sign-off constrained false |
-| `content_events` | Append-only version/sequence history with actor/time and encrypted digest/reason/interval snapshot |
+| `content_events` | Append-only version/sequence history with actor/time, encrypted digest/reason/interval snapshot and a unique audit FK for new operations |
 | `content_idempotency` | Actor/operation/key uniqueness, canonical request hash, encrypted response/status and resource links |
 
 All five tables have FORCE RLS. `tunza_content_permission(text)` is SECURITY
 INVOKER, checks active users/programme grants, has pinned search path and no PUBLIC
-execution. Runtime DML is SELECT/INSERT plus narrow template counter/version update
-columns. Triggers enforce identity/body/period immutability, legal transitions,
+execution. Runtime DML is SELECT/INSERT plus narrow content-version update columns;
+direct template-counter UPDATE is revoked by the stabilization migration below.
+Triggers enforce identity/body/period immutability, legal transitions,
 review independence/digest, matching history and atomic review/state consistency.
 Reviews, events and replay reject UPDATE/DELETE, including owner DML.
 
-Commands lock actor/operation/key, then template, then version. Parent serialization
+Commands take actor/operation/key and template transaction advisory locks, then a
+content-version row lock. Parent serialization
 prevents revision/publication races. Body, review reason, event payload and replay
 use separate authenticated-encryption purposes and existing key-version settings.
 Review, state/counters, events, replay and sanitized audit commit together. Creation,
@@ -130,11 +132,38 @@ Identical retries replay the original encrypted snapshot after checking current
 authority, even after later transitions; changed key input conflicts. No retention
 expiry is guessed. A replay snapshot never authorizes current fixture use.
 
-The migration leaves prior rows/security boundaries intact, adds no SECURITY
-DEFINER function and preserves ordinary-runtime isolation from the opt-in fixture
-transfer database principal. The separate non-production fixture provisioner only
-mirrors the new ordinary helper/DML grants. Downgrade removes these five tables
+The migration leaves prior rows/security boundaries intact and preserves
+ordinary-runtime isolation from the opt-in fixture transfer database principal.
+The separate non-production fixture provisioner only mirrors ordinary helper/DML
+grants. Downgrade of 0014 removes these five tables
 and their guards; it is destructive to Phase 5A history, not a retention workflow.
+
+### Final stabilization: trigger-derived template counters
+
+`0015_content_counter_guard` removes direct `message_templates.version` UPDATE
+privilege from both ordinary and provisioned fixture application logins. A
+content reader cannot bump ETags, even by setting arbitrary session flags. Authors
+and reviewers also cannot increment the counter independently of a content event.
+
+Each new event must link to its own immutable audit record. A narrowly scoped
+SECURITY DEFINER **AFTER INSERT trigger** increments the corresponding template
+exactly once after checking the actual active programme permission, actor/author
+relationship, version state/sequence, audit action/permission/resource/state and
+success outcome. Database `xmin` provenance requires the audit to have been
+inserted in the current application transaction; a historical audit cannot be
+recycled. The unique audit FK prevents two events consuming one audit record.
+The trigger has a pinned search path, fully qualified table references, verifies
+its source relation, and grants no PUBLIC/application EXECUTE capability. RLS and
+all existing transition/review/history guards remain in force on caller DML.
+
+The API inserts the matching audit before the event and refreshes the generated
+counter for the response. Template advisory locks retain author/reviewer
+serialization without giving callers SELECT FOR UPDATE's required UPDATE grant.
+Replays and reads append no content event and therefore do not change counters.
+Failure after the trigger rolls back the counter, child change, event, audit and
+replay together. Upgrade preserves all historical ciphertext/events and existing
+counters; old events have a null audit link rather than fabricated provenance.
+Downgrade to 0014 removes the new links/trigger and restores its older grants.
 
 ## Staff interface
 
@@ -145,17 +174,21 @@ synthetic approve/reject reason; own-content review controls are absent. Publica
 inputs explicitly use Africa/Kampala wall time converted to UTC. Authorized users
 can inspect event history and suspend/resume/retire published fixtures. Lists are
 paginated; filters and layouts adapt to narrow screens. Uncertain retries preserve
-the key; conflicts prompt refresh. D07/dispatch restrictions stay visible.
+the key; conflicts prompt refresh. A confirmed mutation is handled separately
+from subsequent detail/history/metadata/list reads. Failed refreshes show **action
+saved**, clear stale detail/history, and disable further writes until **Refresh
+content** succeeds. Recovery uses GET requests only and never creates another key
+or repeats the completed mutation. D07/dispatch restrictions stay visible.
 
 ## Verification
 
 Locked dependencies were installed and verified locally with PostgreSQL 18,
 Python 3.15.1 and Node 24:
 
-- **326 backend tests**, no failures/skips; 30 new content regressions and all 296
-  existing tests pass. Coverage: 88% overall, 93% content routes.
-- **99 frontend tests across 14 files**, including nine new content tests and all
-  90 prior tests; TypeScript, ESLint, coverage and production build pass.
+- **340 backend tests**, no failures/skips; 44 content regressions and all 296
+  pre-Phase-5A tests pass. Coverage: 88% overall, 93% content routes.
+- **104 frontend tests across 14 files**, including 14 content tests and all
+  90 pre-Phase-5A tests; TypeScript, ESLint, coverage and production build pass.
 - Ruff lint/format, dependency checks and zero-vulnerability npm audit pass.
 - Migration/readiness/schema checks and populated pre-Phase-5A table snapshots
   verify additive upgrade preservation and FORCE RLS.
@@ -164,5 +197,9 @@ Regressions cover separate languages, frozen corrections, self-review and wrong
 digest denial, role separation, encryption, concurrent review/publication,
 durable replay/key conflicts, pagination scope, period boundaries, suspension of
 already-selected references, retirement, revoked authority, direct SQL guards and
-atomic audit-failure rollback. The PR records independent Linux/Python 3.14 CI
+atomic audit-failure rollback. Stabilization adds direct SQL reader/author/reviewer
+counter denial on both logins, forged-flag resistance, missing/wrong/historical/
+reused audit rejection, one increment per event, post-trigger rollback, populated
+0014→0015 preservation, and read-only UI recovery after successful writes.
+The PR records independent Linux/Python 3.14 CI
 verification before delivery. Clinical acceptance still requires D07 approval.

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { StaffIdentity } from '../api/auth'
 import { ApiError, apiFetch, apiFetchPage } from '../api/client'
 import { loadFoundationStatus } from '../api/health'
@@ -22,6 +22,8 @@ const initialVersion = { id: 'version-a', template_id: 'template-a', template_co
 let template: typeof initialTemplate
 let version: typeof initialVersion
 let events: { id: string; sequence: number; event_type: string; actor_id: string; created_at: string; data: { digest: string; reason: string | null } }[]
+
+afterEach(() => vi.restoreAllMocks())
 
 beforeEach(() => {
   vi.resetAllMocks(); template = { ...initialTemplate }; version = { ...initialVersion }
@@ -172,6 +174,79 @@ describe('synthetic clinical content foundation', () => {
     await screen.findByText('Technical fixture action saved. D07 clinical sign-off and dispatch remain disabled.')
     const writes = vi.mocked(apiFetch).mock.calls.filter(([path]) => path.endsWith('/review'))
     expect(writes[0][1]?.idempotencyKey).toBe(writes[1][1]?.idempotencyKey)
+  })
+
+  it.each(['detail', 'history', 'metadata', 'list'])('keeps successful review committed when the %s refresh fails and recovers with reads only', async (failure) => {
+    const keys = vi.spyOn(crypto, 'randomUUID')
+    await open()
+    const fetch = vi.mocked(apiFetch).getMockImplementation()!
+    const page = vi.mocked(apiFetchPage).getMockImplementation()!
+    let committed = false
+    let unavailable = true
+    const failedPath = failure === 'detail' ? '/template-versions/version-a'
+      : failure === 'history' ? '/template-versions/version-a/events' : '/message-templates/template-a'
+    vi.mocked(apiFetch).mockImplementation(async (path, request) => {
+      if (request?.method === 'POST') {
+        const result = await fetch(path, request)
+        committed = true
+        return result
+      }
+      if (committed && unavailable && path === failedPath && failure !== 'list') {
+        throw new ApiError('unavailable', 'Synthetic refresh failure', failure === 'metadata' ? 403 : 503)
+      }
+      return fetch(path, request)
+    })
+    vi.mocked(apiFetchPage).mockImplementation(async (path, request) => {
+      if (committed && unavailable && failure === 'list' && path.startsWith('/template-versions')) {
+        throw new ApiError('unavailable', 'Synthetic list failure', 503)
+      }
+      return page(path, request)
+    })
+    fireEvent.change(screen.getByLabelText('Synthetic review/action reason code'), { target: { value: 'SYN-REVIEW' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Approve exact fixture digest' }))
+    const saved = 'Fixture action saved, but the content view could not be refreshed. Use Refresh content to reload before another action.'
+    await screen.findByText(saved)
+    expect(screen.queryByText('Content action could not be saved. Retry with the same details.')).toBeNull()
+    expect(screen.queryByText('This action is unauthorized or requires an independent reviewer.')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Approve exact fixture digest' })).toBeNull()
+    expect(screen.queryByRole('article', { name: 'Selected fixture version' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh content' }))
+    await waitFor(() => expect(screen.queryByText('Loading content…')).toBeNull())
+    expect(screen.getByText(saved)).toBeInTheDocument()
+    unavailable = false
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh content' }))
+    await waitFor(() => expect(screen.queryByText(saved)).toBeNull())
+    expect(screen.getByRole('button', { name: 'Publish approved fixture period' })).toBeEnabled()
+    expect(screen.getByText('Technical state: approved · ETag version: 3')).toBeInTheDocument()
+    const writes = vi.mocked(apiFetch).mock.calls.filter(([, request]) => request?.method === 'POST')
+    expect(writes).toHaveLength(1)
+    expect(keys).toHaveBeenCalledTimes(1)
+    expect(writes[0][1]?.idempotencyKey).toBe(keys.mock.results[0].value)
+  })
+
+  it('blocks further draft writes after a successful edit until the view refreshes', async () => {
+    version = { ...version, state: 'draft', version: 1 }
+    await open(author)
+    const fetch = vi.mocked(apiFetch).getMockImplementation()!
+    let edited = false
+    vi.mocked(apiFetch).mockImplementation(async (path, request) => {
+      if (request?.method === 'PATCH') { const result = await fetch(path, request); edited = true; return result }
+      if (edited && path.endsWith('/events')) throw new ApiError('unavailable', 'Synthetic refresh failure', 503)
+      return fetch(path, request)
+    })
+    fireEvent.change(screen.getByLabelText('Replacement draft hex identifier'), { target: { value: 'DEADBEEF' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft edit' }))
+    await screen.findByText(/Fixture action saved, but the content view could not be refreshed/)
+    expect(screen.getByRole('button', { name: 'Create fixture template' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Save draft edit' })).toBeNull()
+    // A form submit dispatched directly must also respect the recovery gate.
+    fireEvent.submit(screen.getByRole('button', { name: 'Create fixture template' }).closest('form')!)
+    expect(vi.mocked(apiFetch).mock.calls.filter(([, request]) => ['PATCH', 'POST'].includes(request?.method ?? ''))).toHaveLength(1)
+    vi.mocked(apiFetch).mockImplementation(fetch)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh content' }))
+    await waitFor(() => expect(screen.queryByText(/Fixture action saved, but the content view could not be refreshed/)).toBeNull())
+    expect(screen.getByRole('button', { name: 'Create fixture template' })).toBeEnabled()
+    expect(screen.getByText('Technical state: draft · ETag version: 2')).toBeInTheDocument()
   })
 
   it('does not disclose content on authorization failure', async () => {
