@@ -161,3 +161,9 @@ h3 { font-size: 17px; margin: 0; font-weight: 650; }
 .appointment-list article { padding: 1rem; border: 1px solid #cddcd5; border-radius: .5rem; overflow-wrap: anywhere; }
 .appointment-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .appointment-panel input, .appointment-panel textarea, .appointment-panel select { min-width: 0; max-width: 100%; }
+.transfer-panel { margin-block: 2rem; min-width: 0; }
+.transfer-form { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.transfer-form h4 { grid-column: 1 / -1; }
+.transfer-list { display: grid; gap: 1rem; margin-block: 1rem; }
+.transfer-list article { padding: 1rem; border: 1px solid #cddcd5; border-radius: .5rem; overflow-wrap: anywhere; }
+.transfer-panel input, .transfer-panel select { min-width: 0; max-width: 100%; }

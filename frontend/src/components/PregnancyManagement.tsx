@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { ApiError, apiFetch } from '../api/client'
 import type { StaffIdentity } from '../api/auth'
 import AppointmentManagement from './AppointmentManagement'
+import TransferManagement from './TransferManagement'
 
 interface DatingRevision {
   id: string
@@ -169,6 +170,9 @@ export default function PregnancyManagement({ identity, patient }: {
         <dl><dt>Lifecycle</dt><dd>{episode.lifecycle}</dd>
           <dt>Communication</dt><dd>{episode.communication_state}</dd>
           <dt>Version</dt><dd>{episode.version}</dd></dl>
+        {identity.permissions.includes('transfer.initiate') && <TransferManagement
+          key={`transfer:${patient.facility_id}:${episode.id}`} identity={identity} episode={episode}
+          facilityId={patient.facility_id} onChanged={() => loadDetail(episode.id)} />}
         {identity.permissions.includes('appointment.read') && <AppointmentManagement
           key={`${patient.facility_id}:${episode.id}`} identity={identity} episode={episode}
           facilityId={patient.facility_id} onChanged={() => loadDetail(episode.id)} />}

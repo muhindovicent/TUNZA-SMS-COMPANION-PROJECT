@@ -21,7 +21,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tunza.extensions import db
@@ -183,6 +183,12 @@ class PregnancyEpisode(db.Model):
 class EpisodeFacilityAssignment(db.Model):
     __tablename__ = "episode_facility_assignments"
     __table_args__ = (
+        ExcludeConstraint(
+            ("episode_id", "="),
+            (text("tstzrange(valid_from, valid_to, '[)')"), "&&"),
+            name="ex_episode_responsibility_no_overlap",
+            using="gist",
+        ),
         ForeignKeyConstraint(
             ["episode_id", "patient_id"],
             ["pregnancy_episodes.id", "pregnancy_episodes.patient_id"],

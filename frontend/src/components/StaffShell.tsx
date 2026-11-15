@@ -8,13 +8,14 @@ import AdminPanel from './AdminPanel'
 import BrandMark from './BrandMark'
 import PatientRegistry from './PatientRegistry'
 import EligibilityConsent from './EligibilityConsent'
+import TransferManagement from './TransferManagement'
 
 interface StaffShellProps {
   identity: StaffIdentity
   onSignedOut: () => void
 }
 
-type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility'
+type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility' | 'transfers'
 
 function ConnectionCard({
   title,
@@ -63,6 +64,7 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
   const [signOutError, setSignOutError] = useState<string | null>(null)
   const [view, setView] = useState<ShellView>('overview')
   const showAdmin = hasAdminPermission(identity.permissions)
+  const showTransfers = identity.permissions.includes('transfer.accept')
   const showPatients = identity.permissions.some((permission) =>
     ['patient.read', 'patient.register'].includes(permission),
   )
@@ -117,6 +119,8 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
           </span>
         </a>
         <nav aria-label="Main navigation">
+          {showTransfers && <button type="button" className={view === 'transfers' ? 'nav-link is-active' : 'nav-link'}
+            onClick={() => setView('transfers')}>Transfer inbox</button>}
           <button
             type="button"
             className={view === 'overview' ? 'nav-link is-active' : 'nav-link'}
@@ -175,7 +179,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
       </header>
 
       <main id="main-content">
-        {view === 'patients' && showPatients ? (
+        {view === 'transfers' && showTransfers ? (
+          <TransferManagement identity={identity} />
+        ) : view === 'patients' && showPatients ? (
           <PatientRegistry identity={identity} />
         ) : view === 'eligibility' && showEligibilityConsent ? (
           <EligibilityConsent identity={identity} />
