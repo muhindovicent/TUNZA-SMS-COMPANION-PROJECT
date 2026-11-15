@@ -58,7 +58,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0013_pregnancy_completion"
+                assert revision == "0015_content_counter_guard"
             result = runner.invoke(args=["db", "downgrade", "0006_patient_eligibility_consent"])
             assert result.exit_code == 0, result.output
             with migration_engine.connect() as connection:
@@ -108,6 +108,11 @@ def test_postgres_migration_roundtrip_and_readiness():
                 "pregnancy_dating_revisions",
                 "pregnancy_episodes",
                 "pregnancy_completion_records",
+                "message_templates",
+                "template_versions",
+                "content_reviews",
+                "content_events",
+                "content_idempotency",
                 "permissions",
                 "protected_evidence",
                 "role_bindings",
@@ -504,6 +509,40 @@ def test_0009_populated_upgrade_preserves_records_or_fails_atomically(legacy_sta
                 )
                 == "2027-06-15"
             )
+        result = runner.invoke(args=["db", "check"])
+        assert result.exit_code == 0, result.output
+        # Phase 5A only adds its own tables: every populated prior table is preserved.
+        result = runner.invoke(args=["db", "downgrade", "0013_pregnancy_completion"])
+        assert result.exit_code == 0, result.output
+        with engine.connect() as connection:
+            prior_tables = set(inspect(connection).get_table_names()) - {"alembic_version"}
+            snapshot = {
+                table: sorted(connection.scalars(text(f"SELECT to_jsonb(t)::text FROM {table} t")))
+                for table in prior_tables
+            }
+        result = runner.invoke(args=["db", "upgrade"])
+        assert result.exit_code == 0, result.output
+        with engine.connect() as connection:
+            for table, rows in snapshot.items():
+                assert (
+                    sorted(connection.scalars(text(f"SELECT to_jsonb(t)::text FROM {table} t")))
+                    == rows
+                )
+            for table in (
+                "message_templates",
+                "template_versions",
+                "content_reviews",
+                "content_events",
+                "content_idempotency",
+            ):
+                assert connection.scalar(
+                    text(
+                        "SELECT relrowsecurity AND relforcerowsecurity "
+                        "FROM pg_class WHERE oid = CAST(:table AS regclass)"
+                    ),
+                    {"table": table},
+                )
+                assert connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
         result = runner.invoke(args=["db", "check"])
         assert result.exit_code == 0, result.output
     finally:

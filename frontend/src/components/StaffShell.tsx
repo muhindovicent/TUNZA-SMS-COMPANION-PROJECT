@@ -9,13 +9,14 @@ import BrandMark from './BrandMark'
 import PatientRegistry from './PatientRegistry'
 import EligibilityConsent from './EligibilityConsent'
 import TransferManagement from './TransferManagement'
+import ClinicalContent from './ClinicalContent'
 
 interface StaffShellProps {
   identity: StaffIdentity
   onSignedOut: () => void
 }
 
-type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility' | 'transfers'
+type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility' | 'transfers' | 'content'
 
 function ConnectionCard({
   title,
@@ -65,6 +66,7 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
   const [view, setView] = useState<ShellView>('overview')
   const showAdmin = hasAdminPermission(identity.permissions)
   const showTransfers = identity.permissions.includes('transfer.accept')
+  const showContent = identity.permissions.includes('content.read')
   const showPatients = identity.permissions.some((permission) =>
     ['patient.read', 'patient.register'].includes(permission),
   )
@@ -119,6 +121,8 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
           </span>
         </a>
         <nav aria-label="Main navigation">
+          {showContent && <button type="button" className={view === 'content' ? 'nav-link is-active' : 'nav-link'}
+            onClick={() => setView('content')}>Clinical content</button>}
           {showTransfers && <button type="button" className={view === 'transfers' ? 'nav-link is-active' : 'nav-link'}
             onClick={() => setView('transfers')}>Transfer inbox</button>}
           <button
@@ -179,7 +183,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
       </header>
 
       <main id="main-content">
-        {view === 'transfers' && showTransfers ? (
+        {view === 'content' && showContent ? (
+          <ClinicalContent identity={identity} />
+        ) : view === 'transfers' && showTransfers ? (
           <TransferManagement identity={identity} />
         ) : view === 'patients' && showPatients ? (
           <PatientRegistry identity={identity} />

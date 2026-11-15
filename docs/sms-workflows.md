@@ -17,6 +17,13 @@ Phone number, EDD revision, worker lease, content language, and scheduler-run ID
 
 ## 2. Clinical-content workflow
 
+The implemented [Phase 5A foundation](phase-5a-clinical-content.md) exercises this
+lifecycle using fixed synthetic placeholders only. D07 remains unresolved, all
+versions report `clinical_signoff:false` and `dispatch_eligible:false`, and there is
+no renderer, scheduler or submission worker. Live fixture-reference revalidation
+proves suspension invalidation without creating SMS work or claiming clinical
+approval. The rendering/submission steps below are future contracts.
+
 ```text
 Draft -> Submitted -> Independent approval -> Publication/effective interval
                   -> Rejected (new version required)
