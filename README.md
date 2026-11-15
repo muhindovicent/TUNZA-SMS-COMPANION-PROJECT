@@ -4,7 +4,7 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Feature-branch milestone: Phase 3A — synthetic pregnancy episodes and dating history.** Staff authentication, the synthetic registry, eligibility/consent, and the new assignment-scoped pregnancy workflows are covered by frontend/backend PostgreSQL verification. Clinical dating policy D05 remains unresolved. All development and verification use synthetic data exclusively. See the [Phase 3A implementation and verification guide](docs/phase-3a-pregnancy-dating.md).
+**Feature-branch milestone: Phase 3B — synthetic ANC appointment management.** Staff authentication, the synthetic registry, eligibility/consent, pregnancy dating history and staff-entered appointment workflows are covered by frontend/backend PostgreSQL verification. Clinical appointment policy D06 and dating policy D05 remain unresolved. All development and verification use synthetic data exclusively. See the [Phase 3B implementation and verification guide](docs/phase-3b-anc-appointments.md).
 
 **Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md) · [Phase 1B-1 authentication guide](docs/phase-1b-1-authentication.md).
 
@@ -66,6 +66,6 @@ The earlier [technical implementation plan](TECHNICAL_IMPLEMENTATION_PLAN.md) is
 
 ## Development boundary
 
-This milestone includes staff authentication, synthetic patient registration, eligibility/consent and pregnancy dating-history recording. Dating records do not authorize messaging or automatically schedule ANC appointments. Sign-in accounts are staff-provisioned; there is no public self-registration. See the setup guides for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
+This milestone includes staff authentication, synthetic patient registration, eligibility/consent, pregnancy dating history and manually entered ANC bookings. Dating records do not authorize messaging or automatically schedule appointments. Bookings require independent staff confirmation and remain held for reminders while D06 is unresolved. Sign-in accounts are staff-provisioned; there is no public self-registration. See the setup guides for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
 
 Postnatal workflows, minors' enrolment, live two-way SMS, and live emergency escalation require separate approval and are outside the current implementation authorization.

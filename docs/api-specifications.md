@@ -191,6 +191,13 @@ Administration list/detail projections exclude clinical profile fields. Binding 
 
 ## 6. Care and transfer contracts
 
+**Implemented Phase 3B subset:** see [ANC appointment management](phase-3b-anc-appointments.md)
+for the concrete booking/event contracts, required facility context and If-Match
+versions, UTC timestamps, signed pagination, transition rules and idempotency.
+D06 remains unresolved: only staff-entered times and explicitly recorded attendance
+are supported; reference-contact schedules remain unconfigured and all reminders
+remain held. The broader contracts below still include future work.
+
 | Method / path | Permission | Body -> result |
 | --- | --- | --- |
 | POST `/patients` | `patient.register` | RegistrationInput -> 201 `{patient:Patient,pregnancy:Pregnancy,participant_assignment_id}` |

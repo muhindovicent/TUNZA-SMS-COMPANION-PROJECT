@@ -58,7 +58,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0009_pregnancy_dating"
+                assert revision == "0010_anc_appointments"
             result = runner.invoke(args=["db", "downgrade", "0006_patient_eligibility_consent"])
             assert result.exit_code == 0, result.output
             with migration_engine.connect() as connection:
@@ -86,6 +86,9 @@ def test_postgres_migration_roundtrip_and_readiness():
             expected_tables = {
                 "alembic_version",
                 "audit_events",
+                "appointments",
+                "appointment_events",
+                "appointment_idempotency",
                 "auth_sessions",
                 "communication_preferences",
                 "consent_events",
@@ -351,6 +354,58 @@ def test_0009_populated_upgrade_preserves_records_or_fails_atomically(legacy_sta
             assert result.exit_code == 0, result.output
             result = runner.invoke(args=["db", "upgrade"])
             assert result.exit_code == 0, result.output
+        # Phase 3B is additive: populated Phase 3A history survives its roundtrip.
+        actor, dating_id = uuid4(), uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users "
+                    "(id, login_identifier, display_name, password_hash, status) "
+                    "VALUES (:id, 'synthetic.upgrade', 'Synthetic migration actor', "
+                    "'synthetic-hash', 'active')"
+                ),
+                {"id": actor},
+            )
+            connection.execute(
+                text("""
+                INSERT INTO pregnancy_dating_revisions
+                    (id, episode_id, patient_id, facility_id, basis, estimated_due_date, reason,
+                     recorded_by, idempotency_key, request_hash, parent_version, revision_sequence)
+                VALUES (:id, :episode, :patient, :facility, 'synthetic', '2027-06-15',
+                        'Synthetic preserved dating record', :actor, 'synthetic-upgrade',
+                        :hash, 7, 1)
+            """),
+                {
+                    "id": dating_id,
+                    "episode": episode,
+                    "patient": patient,
+                    "facility": facility,
+                    "actor": actor,
+                    "hash": b"synthetic-hash",
+                },
+            )
+        result = runner.invoke(args=["db", "downgrade", "0009_pregnancy_dating"])
+        assert result.exit_code == 0, result.output
+        with engine.connect() as connection:
+            assert not inspect(connection).has_table("appointments")
+            assert (
+                connection.scalar(
+                    text("SELECT reason FROM pregnancy_dating_revisions WHERE id = :id"),
+                    {"id": dating_id},
+                )
+                == "Synthetic preserved dating record"
+            )
+        result = runner.invoke(args=["db", "upgrade"])
+        assert result.exit_code == 0, result.output
+        with engine.connect() as connection:
+            assert inspect(connection).has_table("appointment_events")
+            assert (
+                connection.scalar(
+                    text("SELECT reason FROM pregnancy_dating_revisions WHERE id = :id"),
+                    {"id": dating_id},
+                )
+                == "Synthetic preserved dating record"
+            )
     finally:
         with app.app_context():
             db.session.remove()

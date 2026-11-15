@@ -21,6 +21,9 @@ For implemented staff sign-in, sessions, and facility-scoped access, see the [Ph
 For the implemented synthetic pregnancy and dating-history milestone, see
 [Phase 3A — pregnancy episodes and dating history](phase-3a-pregnancy-dating.md).
 
+For staff-entered synthetic ANC booking workflows, see
+[Phase 3B — ANC appointment management](phase-3b-anc-appointments.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)
