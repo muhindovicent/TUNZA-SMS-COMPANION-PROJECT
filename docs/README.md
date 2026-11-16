@@ -33,6 +33,9 @@ For append-only completion and auditable lifecycle closure, see
 For synthetic authoring, independent technical review and publication controls, see
 [Phase 5A — clinical-content management](phase-5a-clinical-content.md).
 
+For durable held candidates, redacted scheduling history and synthetic budget tests,
+see [Phase 5B — durable message scheduling](phase-5b-durable-scheduling.md).
+
 1. [Requirements and scope](requirements.md)
 2. [System architecture](architecture.md)
 3. [Database schema and ERD](database-schema.md)

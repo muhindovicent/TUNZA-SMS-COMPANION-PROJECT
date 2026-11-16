@@ -10,13 +10,14 @@ import PatientRegistry from './PatientRegistry'
 import EligibilityConsent from './EligibilityConsent'
 import TransferManagement from './TransferManagement'
 import ClinicalContent from './ClinicalContent'
+import MessagingOverview from './MessagingOverview'
 
 interface StaffShellProps {
   identity: StaffIdentity
   onSignedOut: () => void
 }
 
-type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility' | 'transfers' | 'content'
+type ShellView = 'overview' | 'admin' | 'patients' | 'eligibility' | 'transfers' | 'content' | 'messaging'
 
 function ConnectionCard({
   title,
@@ -67,6 +68,7 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
   const showAdmin = hasAdminPermission(identity.permissions)
   const showTransfers = identity.permissions.includes('transfer.accept')
   const showContent = identity.permissions.includes('content.read')
+  const showMessaging = identity.permissions.some((permission) => ['message.read', 'message.ops'].includes(permission))
   const showPatients = identity.permissions.some((permission) =>
     ['patient.read', 'patient.register'].includes(permission),
   )
@@ -121,6 +123,8 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
           </span>
         </a>
         <nav aria-label="Main navigation">
+          {showMessaging && <button type="button" className={view === 'messaging' ? 'nav-link is-active' : 'nav-link'}
+            onClick={() => setView('messaging')}>Messaging overview</button>}
           {showContent && <button type="button" className={view === 'content' ? 'nav-link is-active' : 'nav-link'}
             onClick={() => setView('content')}>Clinical content</button>}
           {showTransfers && <button type="button" className={view === 'transfers' ? 'nav-link is-active' : 'nav-link'}
@@ -183,7 +187,9 @@ export default function StaffShell({ identity, onSignedOut }: StaffShellProps) {
       </header>
 
       <main id="main-content">
-        {view === 'content' && showContent ? (
+        {view === 'messaging' && showMessaging ? (
+          <MessagingOverview identity={identity} />
+        ) : view === 'content' && showContent ? (
           <ClinicalContent identity={identity} />
         ) : view === 'transfers' && showTransfers ? (
           <TransferManagement identity={identity} />

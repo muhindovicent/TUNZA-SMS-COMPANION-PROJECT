@@ -504,6 +504,14 @@ audit provenance and downgrade behavior.
 
 ## 6. Messaging dictionary
 
+Migration `0016_durable_scheduling` implements the held synthetic subset described
+in [Phase 5B](phase-5b-durable-scheduling.md): occurrences, preparation shells,
+audited history, separate safe operations projections, immutable synthetic
+policy/budget records, capacity-only reservations and encrypted command replay.
+All nine tables use FORCE RLS. The broader dictionary below still describes
+future contact/rendering/attempt/provider fields and sendable states; those are
+not implemented or enabled by a preparation shell or capacity simulation.
+
 | Entity | Additional columns / references | Keys and checks |
 | --- | --- | --- |
 | `message_occurrences` | `episode_id!`, `programme text!`, `kind text!`, `gestational_week integer?`, `appointment_id?`, `reminder_code text?`, `inbound_message_id?`, `response_kind text?`, `due_at!`, `expires_at?`, `state text!`, `hold_reason text?` | Weekly key `(episode,programme,week)`; reminder key `(appointment,reminder_code)`; sandbox-response key `(inbound,response_kind)`; partial unique indexes; kind-specific fields required/XOR; appointment belongs to episode |

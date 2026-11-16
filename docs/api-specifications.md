@@ -252,6 +252,15 @@ Approved notice and ANC source artifacts are controlled configuration inputs wit
 
 ## 7. Content and messaging contracts
 
+**Implemented Phase 5B held-work subset:** [durable synthetic scheduling](phase-5b-durable-scheduling.md)
+defines POST `/message-occurrences` and `/{id}/evaluate`, scoped lists/history,
+separate operations projections, global/facility pause/policy snapshots, immutable
+SYN-unit budgets and capacity-reservation simulations. `message.plan` is assigned
+HCW-only. No clinical week/offset is derived and no work becomes ready/active;
+`dispatch_eligible` is always false. Preparation shells contain no recipient or
+rendered body. Attempt/submission, provider and reconciliation contracts below
+remain future work. Explicit synthetic controls never satisfy D05–D08/D14/D14a/D15.
+
 **Implemented Phase 5A fixture subset:** see [clinical-content management](phase-5a-clinical-content.md).
 Template metadata is immutable and limited to antenatal weekly/reminder slots.
 Text must match a fixed synthetic label, `allowed_parameters` is exactly `[]`, and
