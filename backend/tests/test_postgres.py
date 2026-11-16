@@ -58,7 +58,7 @@ def test_postgres_migration_roundtrip_and_readiness():
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                assert revision == "0015_content_counter_guard"
+                assert revision == "0016_durable_scheduling"
             result = runner.invoke(args=["db", "downgrade", "0006_patient_eligibility_consent"])
             assert result.exit_code == 0, result.output
             with migration_engine.connect() as connection:
@@ -113,6 +113,15 @@ def test_postgres_migration_roundtrip_and_readiness():
                 "content_reviews",
                 "content_events",
                 "content_idempotency",
+                "message_occurrences",
+                "message_dispatches",
+                "message_scheduling_events",
+                "message_operations",
+                "message_operation_events",
+                "messaging_policies",
+                "messaging_budgets",
+                "cost_reservations",
+                "message_commands",
                 "permissions",
                 "protected_evidence",
                 "role_bindings",
@@ -524,6 +533,11 @@ def test_0009_populated_upgrade_preserves_records_or_fails_atomically(legacy_sta
         assert result.exit_code == 0, result.output
         with engine.connect() as connection:
             for table, rows in snapshot.items():
+                if table in {"permissions", "role_permissions"}:
+                    assert set(rows) <= set(
+                        connection.scalars(text(f"SELECT to_jsonb(t)::text FROM {table} t"))
+                    )
+                    continue
                 assert (
                     sorted(connection.scalars(text(f"SELECT to_jsonb(t)::text FROM {table} t")))
                     == rows

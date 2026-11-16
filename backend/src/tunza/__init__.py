@@ -36,6 +36,8 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     from tunza.identity import admin as identity_admin  # noqa: F401
     from tunza.identity import admin_blueprint, auth_blueprint, facilities_blueprint
     from tunza.identity import routes as identity_routes  # noqa: F401
+    from tunza.messaging import blueprint as messaging_blueprint
+    from tunza.messaging import routes as messaging_routes  # noqa: F401
     from tunza.patients import blueprint as patients_blueprint
     from tunza.patients import routes as patient_routes  # noqa: F401
     from tunza.pregnancy import blueprint as pregnancy_blueprint
@@ -53,6 +55,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.register_blueprint(appointments_blueprint)
     app.register_blueprint(transfers_blueprint)
     app.register_blueprint(content_blueprint)
+    app.register_blueprint(messaging_blueprint)
 
     from tunza.commands import seed_synthetic_identity
 

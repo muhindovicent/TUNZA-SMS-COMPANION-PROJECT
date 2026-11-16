@@ -42,6 +42,13 @@ English approval never approves Luganda automatically. Retired/rejected content 
 
 ## 3. Planning weekly education
 
+The implemented [Phase 5B](phase-5b-durable-scheduling.md) persists durable,
+business-key-unique **held candidates** using explicit synthetic indexes/windows.
+It rechecks current eligibility, appends audited invalidation history, exposes
+separate redacted operations metadata and enforces synthetic capacity caps.
+D05/D06 week/offset derivation and sending policies remain unconfigured; the
+clinical planning/submission sequence below is a future approved-policy contract.
+
 1. Select an ongoing episode under current approved responsibility.
 2. Resolve effective dating and the approved programme/week calculation (D05).
 3. Upsert the unique weekly occurrence for the useful current window.

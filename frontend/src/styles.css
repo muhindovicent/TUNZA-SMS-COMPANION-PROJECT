@@ -180,3 +180,5 @@ h3 { font-size: 17px; margin: 0; font-weight: 650; }
 .content-list { display: grid; gap: 1rem; margin-block: 1rem; }
 .content-list article, .content-version { padding: 1rem; border: 1px solid #cddcd5; border-radius: .5rem; overflow-wrap: anywhere; }
 .content-management input, .content-management select { max-width: 100%; min-width: 0; }
+.messaging-overview { padding-block: 1.5rem; min-width: 0; overflow-wrap: anywhere; }
+.messaging-overview input, .messaging-overview select { max-width: 100%; min-width: 0; }

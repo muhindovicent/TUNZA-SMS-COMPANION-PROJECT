@@ -4,7 +4,7 @@
 
 TUNZA is a proposed maternal-health communication and care-coordination system. It is designed to help participating healthcare teams register consenting adult participants, coordinate antenatal care (ANC), and deliver clinically approved, pregnancy-stage-appropriate SMS information.
 
-**Feature-branch milestone: Phase 5A — synthetic clinical-content management.** Authors and independent reviewers can manage encrypted English/Luganda placeholder versions, exact-digest technical review, controlled publication, suspension and retirement. D07 remains unresolved: fixture approval is not clinical sign-off and every version remains ineligible for dispatch. All development and verification use synthetic data exclusively. See the [Phase 5A implementation guide](docs/phase-5a-clinical-content.md).
+**Feature-branch milestone: Phase 5B — durable synthetic message scheduling.** Assigned staff can persist idempotent weekly/reminder candidates, inspect explicit holds and revalidate current facts. Operations can inspect redacted scheduling metadata, pause scopes and exercise synthetic budget caps. All work remains dispatch-ineligible while clinical, contact, timing and sending-policy decisions are unresolved. See the [Phase 5B implementation guide](docs/phase-5b-durable-scheduling.md).
 
 **Start here:** [Phase 1A setup and verification guide](docs/phase-1a-foundation.md) · [Phase 1B-1 authentication guide](docs/phase-1b-1-authentication.md).
 
@@ -53,6 +53,7 @@ Start with the [draft documentation index](docs/README.md).
 | [Phase 1B CI checkpoint](docs/ci-verification.md) | Automated frontend/backend checks, disposable PostgreSQL and run inspection |
 | [Phase 1B-1 authentication](docs/phase-1b-1-authentication.md) | Staff login, sessions, CSRF, rate limiting, RBAC and facility isolation |
 | [Phase 5A clinical content](docs/phase-5a-clinical-content.md) | Synthetic author/reviewer lifecycle, exact digest, publication and suspension |
+| [Phase 5B durable scheduling](docs/phase-5b-durable-scheduling.md) | Durable held occurrences/preparations, safe operations metadata and synthetic capacity controls |
 | [Requirements](docs/requirements.md) | Recorded v1.1 mapping, MVP boundaries, acceptance identifiers |
 | [Architecture](docs/architecture.md) | Components, module boundaries, deployments, design decisions |
 | [Database schema and ERD](docs/database-schema.md) | Entities, relationships, keys, constraints, data dictionary |
@@ -67,6 +68,6 @@ The earlier [technical implementation plan](TECHNICAL_IMPLEMENTATION_PLAN.md) is
 
 ## Development boundary
 
-This milestone includes staff authentication, the synthetic registry, consent, pregnancy dating history, ANC bookings, opt-in fixture transfers, auditable pregnancy completion and synthetic content management. Clinical policy decisions remain unresolved; content accepts only labelled placeholders with no substitutions, and completion accepts no clinical outcomes. Messaging and postnatal enrolment remain unavailable. Transfers remain disabled by default and isolated from the standard runtime. Sign-in accounts are staff-provisioned; there is no public self-registration. See the setup guides for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
+This milestone includes staff authentication, the synthetic registry, consent, pregnancy dating history, ANC bookings, opt-in fixture transfers, auditable pregnancy completion, synthetic content management and durable held-message scheduling. Clinical policy decisions remain unresolved; content accepts only labelled placeholders with no substitutions, and completion accepts no clinical outcomes. Budget reservations are synthetic capacity tests; SMS submission and postnatal enrolment remain unavailable. Transfers remain disabled by default and isolated from the standard runtime. Sign-in accounts are staff-provisioned; there is no public self-registration. See the setup guides for local installation. No application has been deployed. Do not add credentials, provider API keys, production exports, real patient information, or unreviewed clinical content to source control. Development and sandbox exercises must use synthetic patient data exclusively.
 
 Postnatal workflows, minors' enrolment, live two-way SMS, and live emergency escalation require separate approval and are outside the current implementation authorization.

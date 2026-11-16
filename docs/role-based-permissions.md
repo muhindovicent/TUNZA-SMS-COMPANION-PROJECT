@@ -86,6 +86,7 @@ Every cell is a proposed default grant plus scope, not an informal suggestion.
 | `content.publish` | — | — | — | — | R | — | — |
 | `content.suspend` | — | — | — | — | R | — | — |
 | `message.read` | S | A | — | — | — | — | — |
+| `message.plan` | — | A | — | — | — | — | — |
 | `message.ops` | — | — | F | — | — | P | — |
 | `message.reconcile` | — | — | — | — | — | P | — |
 | `messaging.control` | — | — | F | — | — | P | — |
@@ -108,6 +109,12 @@ Every cell is a proposed default grant plus scope, not an informal suggestion.
 `****` Platform aggregates are infrastructure/delivery health only. Programme clinical aggregates require a distinct approved analyst binding.
 
 ## 5. Field-level restrictions
+
+Phase 5B's `message.plan` is an implemented **synthetic-only** HCW capability for
+assigned held candidates and rechecks; it grants no submission or clinical policy
+override. Existing PA operations/control grants see separate identity-free
+projections. Draft FA messaging grants remain unseeded pending D04. See
+[Phase 5B](phase-5b-durable-scheduling.md) for the concrete scopes and SQL guards.
 
 | Resource | Permitted subset / restriction |
 | --- | --- |
